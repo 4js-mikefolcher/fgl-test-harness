@@ -1,0 +1,62 @@
+# fgltest CI.
+#
+# Genero is commercial and is not available on GitHub-hosted runners, so this
+# workflow targets a self-hosted runner that already has a Genero environment
+# (fglcomp/fglrun on PATH). Label such a runner `genero` to enable it.
+#
+# The gate is `make check`: fgltest's own test suite runs against a fake driver,
+# with no GGC engine, no scenario server and no application under test, so it is
+# fast and deterministic. `make test` (the end-to-end example run) needs the GGC
+# toolkit as well and is kept as a separate, non-blocking job.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build, self-test and lint
+    runs-on: [self-hosted, genero]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the package
+        run: make
+
+      - name: Run fgltest's own test suite
+        run: make check
+
+      - name: Validate the fglpkg manifest
+        run: fglpkg lint
+
+      - name: Verify the package builds
+        run: fglpkg pack
+
+  e2e:
+    name: End-to-end example run
+    runs-on: [self-hosted, genero, ggc]
+    # The example suite drives a real application through the GGC scenario
+    # server. It is informational: a flaky UI run must not block a merge.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the package and the example
+        run: make
+
+      - name: Run the example suites
+        run: |
+          . "$FGLDIR/testing_utilities/ggc/envggc"
+          make test
+
+      - name: Publish the JUnit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fgltest-reports
+          path: results/*.junit.xml
+          if-no-files-found: warn

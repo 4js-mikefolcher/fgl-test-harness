@@ -1,0 +1,33 @@
+# FOURJS_START_COPYRIGHT(U,2018)
+# Property of Four Js*
+# (c) Copyright Four Js 2018, 2025. All Rights Reserved.
+# * Trademark of Four Js Development Tools Europe Ltd
+#   in the United States and elsewhere
+#
+# Four Js and its suppliers do not warrant or guarantee that these samples
+# are accurate and suitable for your purposes. Their inclusion is purely for
+# information purposes only.
+# FOURJS_END_COPYRIGHT
+LAYOUT(TEXT = "Product and prices")
+GRID
+{
+ <T t_prices                                                  >
+   Product name        Price
+  [name               |price                                 ]
+ <                                                            >
+
+ Preview: [photo          ]     Image: [simage        ]
+}
+END
+
+ATTRIBUTES
+TABLE t_prices: prices, DOUBLECLICK = edit, HEIGHT=2;
+EDIT name = FORMONLY.name, COMMENT = "Product name", SCROLL;
+EDIT price = FORMONLY.price, COMMENT = "Price", SCROLL;
+IMAGE photo = FORMONLY.photo;
+IMAGE simage: IMAGE="frame-4js.jpg";
+END
+
+INSTRUCTIONS
+SCREEN RECORD sr_prices(FORMONLY.name, FORMONLY.price)
+END

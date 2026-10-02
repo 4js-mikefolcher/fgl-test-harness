@@ -1,0 +1,122 @@
+{
+  "$schema": "../../schema/action-file.schema.json",
+  "application": "price",
+  "beforeEach": [
+    {
+      "command": "pause",
+      "value": "100"
+    }
+  ],
+  "afterAll": [
+    {
+      "command": "action",
+      "target": "cancel"
+    }
+  ],
+  "tests": [
+    {
+      "name": "shows edit and cancel actions",
+      "steps": [
+        {
+          "command": "assertActionActive",
+          "target": "edit"
+        },
+        {
+          "command": "assertActionActive",
+          "target": "cancel"
+        }
+      ]
+    },
+    {
+      "name": "lists three fields incl. price",
+      "steps": [
+        {
+          "command": "assertFieldCount",
+          "value": "3"
+        },
+        {
+          "command": "assertFieldEnabled",
+          "target": "formonly.price"
+        }
+      ]
+    },
+    {
+      "name": "starts on the price form",
+      "steps": [
+        {
+          "command": "assertFormName",
+          "value": "price"
+        }
+      ]
+    },
+    {
+      "name": "reads table cells (list)",
+      "steps": [
+        {
+          "command": "assertRowCount",
+          "target": "prices",
+          "value": "5"
+        },
+        {
+          "command": "assertCellAtRow",
+          "target": "prices",
+          "column": "name",
+          "row": 1,
+          "value": "Globe"
+        },
+        {
+          "command": "selectRow",
+          "target": "prices",
+          "row": 3
+        },
+        {
+          "command": "assertCell",
+          "target": "prices",
+          "column": "name",
+          "value": "Blue Scissors"
+        }
+      ]
+    },
+    {
+      "name": "matches cell text by pattern",
+      "steps": [
+        {
+          "command": "assertTableExists",
+          "target": "prices"
+        },
+        {
+          "command": "assertRowCountAtLeast",
+          "target": "prices",
+          "value": "1"
+        },
+        {
+          "command": "selectRow",
+          "target": "prices",
+          "row": 1
+        },
+        {
+          "command": "assertCellMatches",
+          "target": "prices",
+          "column": "name",
+          "value": "^Glo"
+        },
+        {
+          "command": "assertCellContains",
+          "target": "prices",
+          "column": "name",
+          "value": "lob"
+        }
+      ]
+    },
+    {
+      "name": "DEMO: skipped while under construction",
+      "skip": true,
+      "steps": [
+        {
+          "command": "assertFormName",
+          "value": "not-written-yet"
+        }
+      ]
+    }
+  ]
+}

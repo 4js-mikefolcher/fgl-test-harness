@@ -1,0 +1,244 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/4js-mikefolcher/fgl-test-harness/schema/action-file.schema.json",
+  "title": "fgltest action file",
+  "description": "A declarative functional-test file for fgltest. Each test is a list of command/target/value steps dispatched to the same verbs the compiled BDL API uses.",
+  "type": "object",
+  "required": [
+    "application",
+    "tests"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "application": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Name of the application under test, as passed to the GGC engine."
+    },
+    "beforeAll": {
+      "$ref": "#/$defs/steps",
+      "description": "Steps run once before all tests."
+    },
+    "beforeEach": {
+      "$ref": "#/$defs/steps",
+      "description": "Steps run before every test."
+    },
+    "afterEach": {
+      "$ref": "#/$defs/steps",
+      "description": "Steps run after every test."
+    },
+    "afterAll": {
+      "$ref": "#/$defs/steps",
+      "description": "Steps run once after all tests."
+    },
+    "tests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/test"
+      }
+    }
+  },
+  "$defs": {
+    "test": {
+      "type": "object",
+      "required": [
+        "name",
+        "steps"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Test name, as reported."
+        },
+        "skip": {
+          "type": "boolean",
+          "default": false,
+          "description": "Report this test as skipped without running it."
+        },
+        "only": {
+          "type": "boolean",
+          "default": false,
+          "description": "Focus the run: if any test sets only, every other test is skipped."
+        },
+        "steps": {
+          "$ref": "#/$defs/steps"
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "enum": [
+            "action",
+            "assertActionActive",
+            "assertActionExists",
+            "assertActionInactive",
+            "assertActionMissing",
+            "assertCell",
+            "assertCellAtRow",
+            "assertCellContains",
+            "assertCellMatches",
+            "assertCurrent",
+            "assertCurrentRow",
+            "assertField",
+            "assertFieldContains",
+            "assertFieldCount",
+            "assertFieldDisabled",
+            "assertFieldEditable",
+            "assertFieldEnabled",
+            "assertFieldExists",
+            "assertFieldMatches",
+            "assertFieldMissing",
+            "assertFieldNot",
+            "assertFieldReadOnly",
+            "assertFormName",
+            "assertFormTitle",
+            "assertRowCount",
+            "assertRowCountAtLeast",
+            "assertRowCountAtMost",
+            "assertTableExists",
+            "assertWindowName",
+            "assertWindowTitle",
+            "clear",
+            "enter",
+            "field",
+            "fill",
+            "focusCell",
+            "key",
+            "pause",
+            "selectRow"
+          ],
+          "description": "The verb or assertion to run."
+        },
+        "target": {
+          "type": "string",
+          "description": "What the command acts on: a field, action, key or table name."
+        },
+        "column": {
+          "type": "string",
+          "description": "Table column name (plain colName, not formonly.x)."
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based table row."
+        },
+        "value": {
+          "type": "string",
+          "description": "The expected value, or the argument for an interaction verb."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "action",
+                  "assertActionActive",
+                  "assertActionExists",
+                  "assertActionInactive",
+                  "assertActionMissing",
+                  "assertCell",
+                  "assertCellAtRow",
+                  "assertCellContains",
+                  "assertCellMatches",
+                  "assertCurrentRow",
+                  "assertField",
+                  "assertFieldContains",
+                  "assertFieldDisabled",
+                  "assertFieldEditable",
+                  "assertFieldEnabled",
+                  "assertFieldExists",
+                  "assertFieldMatches",
+                  "assertFieldMissing",
+                  "assertFieldNot",
+                  "assertFieldReadOnly",
+                  "assertRowCount",
+                  "assertRowCountAtLeast",
+                  "assertRowCountAtMost",
+                  "assertTableExists",
+                  "field",
+                  "fill",
+                  "focusCell",
+                  "key",
+                  "selectRow"
+                ]
+              }
+            },
+            "required": [
+              "command"
+            ]
+          },
+          "then": {
+            "required": [
+              "target"
+            ],
+            "properties": {
+              "target": {
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "assertCell",
+                  "assertCellAtRow",
+                  "assertCellContains",
+                  "assertCellMatches",
+                  "assertCurrent",
+                  "assertCurrentRow",
+                  "assertField",
+                  "assertFieldContains",
+                  "assertFieldCount",
+                  "assertFieldMatches",
+                  "assertFieldNot",
+                  "assertFormName",
+                  "assertFormTitle",
+                  "assertRowCount",
+                  "assertRowCountAtLeast",
+                  "assertRowCountAtMost",
+                  "assertWindowName",
+                  "assertWindowTitle",
+                  "enter",
+                  "fill",
+                  "pause"
+                ]
+              }
+            },
+            "required": [
+              "command"
+            ]
+          },
+          "then": {
+            "required": [
+              "value"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

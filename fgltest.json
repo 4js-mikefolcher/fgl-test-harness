@@ -1,0 +1,21 @@
+{
+  "port": 6500,
+  "reporters": "console,junit,tap,json",
+  "outdir": "results",
+  "suites": [
+    {
+      "name": "price",
+      "module": "examples/price/price_test",
+      "mode": "tcp",
+      "workdir": "examples/price",
+      "commandLine": "fglrun price"
+    },
+    {
+      "name": "price-json",
+      "actions": "examples/price/price.actions.json",
+      "mode": "tcp",
+      "workdir": "examples/price",
+      "commandLine": "fglrun price"
+    }
+  ]
+}

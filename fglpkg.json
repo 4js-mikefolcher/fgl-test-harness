@@ -1,0 +1,14 @@
+{
+  "$schema": "https://fglpkg.io/schema/v1/fglpkg.schema.json",
+  "name": "4js-fgltest",
+  "version": "1.0.0",
+  "description": "Modern functional-test harness for Genero BDL apps — CLI runner, hooks, fluent API, AUI-tree introspection, and JUnit/TAP/JSON/console reports, built on the GGC engine.",
+  "author": "Michael Folcher <michael.folcher@4js.com>",
+  "repository": "https://github.com/4js-mikefolcher/fgl-test-harness",
+  "license": "Apache-2.0",
+  "keywords": ["testing", "functional-tests", "ggc", "aui", "junit", "tap", "genero"],
+  "genero": ">=6.0.0",
+  "root": "com/fourjs/fgltest",
+  "programs": ["fgltest", "fgltest_json"],
+  "docs": ["README.md", "USERGUIDE.md", "CHANGELOG.md"]
+}
