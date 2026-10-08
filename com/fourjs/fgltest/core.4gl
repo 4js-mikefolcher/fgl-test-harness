@@ -8,7 +8,7 @@ IMPORT os
 IMPORT FGL com.fourjs.fgltest.driver
 
 #+ Package version. Keep in step with fglpkg.json and CHANGELOG.md.
-PUBLIC CONSTANT VERSION = "1.1.0"
+PUBLIC CONSTANT VERSION = "1.1.1"
 
 
 #+ One recorded assertion outcome.

@@ -33,7 +33,8 @@ which runs each test in its own process.)
 
 ## 2. Requirements
 
-- Genero BDL **6.x** — `fglcomp`, `fglform`, `fglrun` on `PATH`.
+- Genero BDL **6.x**, or **5.01** or later — `fglcomp`, `fglform`, `fglrun` on
+  `PATH`.
 - The **GGC toolkit** shipped with Genero (`$FGLDIR/testing_utilities/ggc`).
   Source its `envggc` so that `ggc.jar` is on `CLASSPATH`, `ggc.42m` is on
   `FGLLDPATH`, and `ggcadmin` is on `PATH`.

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [1.1.1] - 2026-10-08
+
+### Changed
+
+- **Genero 5 support.** The manifest's Genero range is `^5.1.0 || ^6.0.0`
+  (was `^6.0.0`), and the package is published with a Genero 5 build beside
+  the Genero 6 one, so `fglpkg install` serves Genero 5.01 and later as well as
+  6.x. No code changes: 1.1.0 builds and passes its self-tests and the bundled
+  example suites unchanged on Genero 5.01.02 with GGC 5.01.01. Genero 5.00 is
+  not claimed, as it has not been tested. (1.1.0 itself stays Genero 6 only:
+  the registry fixes a version's range when it is first published.)
+
 ## [1.1.0] - 2026-10-08
 
 Hardening for distribution. A run can no longer pass when a suite crashed, was
@@ -366,7 +378,8 @@ First public release.
 - **`Driver` INTERFACE** seam over `IMPORT FGL ggc` (default `ggcdriver`), so an
   alternate backend can be substituted without touching suites.
 
-[Unreleased]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v0.2.0...v0.3.0

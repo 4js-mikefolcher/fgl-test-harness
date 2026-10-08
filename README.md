@@ -20,7 +20,8 @@ the package **`com.fourjs.fgltest`**. For a step-by-step walkthrough see
 
 ## Requirements
 
-- Genero BDL **6.x** (`fglcomp`, `fglform`, `fglrun` on `PATH`).
+- Genero BDL **6.x**, or **5.01** or later (`fglcomp`, `fglform`, `fglrun` on
+  `PATH`).
 - The **GGC toolkit** shipped with the Genero installation
   (`$FGLDIR/testing_utilities/ggc`): source its `envggc` so `ggc.jar` is on
   `CLASSPATH`, `ggc.42m` is on `FGLLDPATH`, and `ggcadmin` is on `PATH`.
