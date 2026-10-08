@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.1.0] - 2026-10-08
+
+Hardening for distribution. A run can no longer pass when a suite crashed, was
+killed or never started; the installed package works out of the box; config
+and action-file mistakes are reported before anything runs; and every report
+format is consistent and parseable. Two behaviours change for existing users —
+config paths are relative to the config file, and the JSON report's `failed`
+no longer includes errors — see **Changed**.
+
 ### Fixed
 
 - **A suite that dies part-way no longer passes.** The CLI judged a suite by its
@@ -313,7 +324,8 @@ First public release.
 - **`Driver` INTERFACE** seam over `IMPORT FGL ggc` (default `ggcdriver`), so an
   alternate backend can be substituted without touching suites.
 
-[Unreleased]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v0.1.0...v0.2.0

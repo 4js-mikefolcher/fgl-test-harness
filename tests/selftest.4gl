@@ -115,6 +115,9 @@ MAIN
     CALL group("server: a server already running is not claimed")
     CALL t_server_ownership()
 
+    CALL group("release: the version is the same everywhere")
+    CALL t_version()
+
     CALL summary()
 END MAIN
 
@@ -1518,4 +1521,27 @@ FUNCTION t_runner_duplicates()
     CALL checkInt("selecting the name reports the test and its repeat", rep.tests, 2)
     CALL checkInt("... running it once", rep.errors, 1)
     CALL removeDir(dir)
+END FUNCTION
+
+# --------------------------------------------------------------- release ----
+
+# core.VERSION (what `fgltest --version` prints), fglpkg.json (what is
+# published) and CHANGELOG.md (what is documented) must name the same release.
+FUNCTION t_version()
+    DEFINE root, manifest, changelog STRING
+    DEFINE m util.JSONObject
+    DEFINE v STRING
+
+    LET root = os.Path.join(base.Application.getProgramDir(), "..")
+    LET manifest = readTmp(os.Path.join(root, "fglpkg.json"))
+    LET changelog = readTmp(os.Path.join(root, "CHANGELOG.md"))
+    IF manifest IS NULL OR changelog IS NULL THEN
+        CALL check("fglpkg.json and CHANGELOG.md can be read", FALSE)
+        RETURN
+    END IF
+    LET m = util.JSONObject.parse(manifest)
+    LET v = m.get("version")
+    CALL checkEq("core.VERSION matches fglpkg.json", core.VERSION, v)
+    CALL check("CHANGELOG.md has a section for this version",
+        contains(changelog, SFMT("## [%1] - ", core.VERSION)))
 END FUNCTION
