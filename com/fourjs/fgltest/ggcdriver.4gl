@@ -54,15 +54,28 @@ PRIVATE FUNCTION check(op STRING, target STRING)
     END IF
     CALL core.setDriverError(SFMT("(GGC-%1) %2 [%3 '%4']",
         ggc.statusCode, ggc.statusMsg, op, target))
-    # The application can no longer be driven: the program has ended
-    # (ILLEGAL_STATE: "the scenario has already ended"), or the session is gone.
-    # No later test can run, so the runner stops scheduling.
-    IF ggc.statusCode == ggc.ILLEGAL_STATE
-        OR ggc.statusCode == ggc.CLOSED
-        OR ggc.statusCode == ggc.PREMATURE_SCENARIO_END THEN
+    # The application can no longer be driven: no later test can run, so the
+    # runner stops scheduling.
+    IF sessionOver(ggc.statusCode, ggc.statusMsg) THEN
         CALL core.setFatal()
     END IF
     LET ggc.statusCode = ggc.SUCCESS
+END FUNCTION
+
+#+ TRUE if a GGC status means the application under test can no longer be
+#+ driven: the session is gone (CLOSED, PREMATURE_SCENARIO_END), or the program
+#+ has ended. GGC reports the latter as ILLEGAL_STATE, but uses that code for
+#+ other states as well ("the DVM is not in interactive state but VM
+#+ processing", "client already started"), so only its "already ended" message
+#+ counts: a busy application must not end the whole run.
+PUBLIC FUNCTION sessionOver(code INTEGER, msg STRING) RETURNS BOOLEAN
+    IF code == ggc.CLOSED OR code == ggc.PREMATURE_SCENARIO_END THEN
+        RETURN TRUE
+    END IF
+    IF code == ggc.ILLEGAL_STATE AND msg.toLowerCase().getIndexOf("already ended", 1) > 0 THEN
+        RETURN TRUE
+    END IF
+    RETURN FALSE
 END FUNCTION
 
 # TRUE when the current test has already failed at the driver level, so this

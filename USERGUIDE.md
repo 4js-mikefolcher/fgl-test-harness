@@ -189,6 +189,10 @@ Conversion errors in those functions are raised too, instead of silently
 producing NULL. Without the opt-in the suite process stops, and the reports
 (§7) mark that test "did not complete" and the remaining ones "not run".
 
+Some errors cannot be trapped at all, with or without the opt-in: BDL's
+non-trappable errors — `-1326` (array index out of bounds) among them — stop
+the program wherever they occur, and end the suite the same way.
+
 ### 4.2 Interaction verbs (`flow`)
 
 Each verb acts on the application through the active driver. They are **void**
@@ -399,8 +403,11 @@ Top-level keys: `application` (required), the optional hook step-lists
 is started, and every problem in the file is reported at once: an unknown
 command; a missing `target`, `value`, `column` or `row` (rows start at 1); a
 count or delay (`pause`, `assertFieldCount`, `assertRowCount*`,
-`assertCurrentRow`) that is not a whole number; and two tests with the same
-name.
+`assertCurrentRow`) that is not a whole number; two tests with the same name;
+an unknown key (`"skipp": true` would otherwise run the test); and a value of
+the wrong type (`"row": 1.5` would otherwise be row 1). Keys match without
+regard to case, as the JSON parser matches them — except `column` and `row`,
+which must be spelled exactly. Keys starting with `$` or `_` are allowed.
 
 ```
 fgltest_json: action file 'tests/price.actions.json' is not valid:
@@ -497,20 +504,39 @@ Each suite:
 | `module` | Compiled suite program to run **— or —** |
 | `actions` | Path to a JSON action file (run via `jsonRunner`). Use one of `module`/`actions`. |
 | `mode` | `tcp` (launch the app locally) or `ua` (drive a GAS-deployed app). |
-| `workdir`, `commandLine` | For `tcp`: the app's working directory (default: the config's directory) and launch command (default: GGC's `fglrun <application>`). The command line reaches GGC as written — on POSIX the shell still expands `$VAR` — and GGC splits it at spaces without honouring quotes, so an argument cannot contain a space. |
+| `workdir`, `commandLine` | For `tcp`: the app's working directory (default: the config's directory) and launch command (default: GGC's `fglrun <application>`). GGC splits the command line at spaces without honouring quotes, so an application argument cannot contain a space. |
 | `url` | For `ua`: the GAS application URL. |
 | `isolate` | Run this suite's tests in isolated processes (in addition to the global `isolate`). |
 | `timeout` | Wall-clock limit for this suite, in seconds; overrides the global `timeout`. |
 
 **Validation.** The config is checked before the scenario server or any
-application starts, and every problem is listed (exit code 2): an unknown key
-— a typo such as `comandLine` would otherwise be silently ignored — a suite
-without a name or reusing another's (suites write reports under their name),
-a suite with both or neither of `module` / `actions`, a `module` (or `.42m`)
-or action file that does not exist, an unknown `mode` or reporter, a `ua`
-suite without a `url`, and a negative `timeout`. Keys starting with `$` or `_`
-are allowed, for `$schema` or comment entries. A discovered suite whose name
-is already taken is skipped with a note.
+application starts, and every problem is listed (exit code 2):
+
+- an unknown key — a typo such as `comandLine` would otherwise be silently
+  ignored. Keys match without regard to case, as the JSON parser matches them;
+  keys starting with `$` or `_` are allowed, for `$schema` or comment entries;
+- a value of the wrong type — `"timeout": "30s"` or `"isolate": "yes"` would
+  otherwise become NULL, `"timeout": 1.5` would be truncated;
+- a `port` outside 1–65535 (an absent `port` is 6500);
+- a suite without a name or reusing another's (suites write reports under
+  their name); a name with a path separator, or `fgltest.summary` /
+  `ggcserver` (reserved); a suite whose reports would overwrite the config or
+  an action file — the CLI deletes stale reports before it runs;
+- a suite with both or neither of `module` / `actions`, a `module` (or
+  `.42m`) or action file that does not exist;
+- an unknown `mode` or reporter, a `ua` suite without a `url`, a negative
+  `timeout`;
+- an environment variable that is not set (below).
+
+A discovered suite whose name is already taken, or whose reports would clash,
+is skipped with a note.
+
+**Environment variables.** `$NAME` and `${NAME}` in `outdir`, `jsonRunner`, a
+suite's `module` / `actions` / `workdir` / `commandLine` / `url`, and the same
+`discover` keys, are replaced by the variable's value — by fgltest, the same
+way on every platform, before paths are resolved. `$$` is a literal `$`, and a
+`$` not followed by a name is kept. The values are then passed to the suite
+exactly as they are: no shell sees them.
 
 **Paths.** Every relative path in the config — `outdir`, `jsonRunner`, a suite's
 `module` / `actions` / `workdir`, and `discover.dir` / `discover.workdir` — is
@@ -684,7 +710,9 @@ never reached (`not run: …`).
 The CLI also checks that each suite process reached the end: the runner drops a
 `<name>.done` marker when it finishes, and a process that exits without one is
 counted as **incomplete**, even if every test that finished had passed. Before
-each run the CLI deletes that suite's previous reports and marker, so results
+the run the CLI deletes every suite's previous reports and markers — the
+whole-suite and the per-test (isolated) ones alike, whichever mode ran last —
+and one it cannot delete stops the run (exit code 2), so results
 left by an earlier run can never stand in for this one.
 
 The process exit code is non-zero if any test failed or errored, or any suite

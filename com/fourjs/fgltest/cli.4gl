@@ -16,13 +16,20 @@ IMPORT util
 IMPORT FGL com.fourjs.fgltest.core
 IMPORT FGL com.fourjs.fgltest.server
 
-# The keys a config may use, by object. Any other key is reported: a typo'd
-# key would otherwise be dropped silently by the JSON parser. Keys starting
-# with "$" or "_" are left alone, for "$schema" and comment-style entries.
-PRIVATE CONSTANT TOP_KEYS = "port,reporters,outdir,jsonRunner,isolate,timeout,discover,suites"
-PRIVATE CONSTANT SUITE_KEYS = "name,module,actions,mode,workdir,commandLine,url,isolate,timeout"
-PRIVATE CONSTANT DISCOVER_KEYS = "dir,mode,workdir,commandLine,url,modulePattern"
+# The shape of a config, object by object: each key and the JSON type its value
+# must have (see core.checkShape). Any other key is reported — a typo'd key
+# would otherwise be dropped silently by the JSON parser — and so is a value of
+# the wrong type, which the parser would turn into NULL.
+PRIVATE CONSTANT TOP_SPEC = "port:int,reporters:string,outdir:string,jsonRunner:string,isolate:boolean,timeout:int,discover:object,suites:array"
+PRIVATE CONSTANT SUITE_SPEC = "name:string,module:string,actions:string,mode:string,workdir:string,commandLine:string,url:string,isolate:boolean,timeout:int"
+PRIVATE CONSTANT DISCOVER_SPEC = "dir:string,mode:string,workdir:string,commandLine:string,url:string,modulePattern:string"
 PRIVATE CONSTANT REPORTERS = "console,junit,tap,json"
+
+# The files a suite writes into outdir, all named after it.
+PRIVATE CONSTANT RUN_FILE_EXTS = ".json,.junit.xml,.tap,.done,.log,.tests,.list.log"
+
+# The first environment variable normalize() found unset (see expand()).
+PRIVATE DEFINE m_unsetVar STRING
 
 PUBLIC TYPE NameList DYNAMIC ARRAY OF STRING
 
@@ -85,11 +92,17 @@ END RECORD
 
 # ---------------------------------------------------------------- config ----
 
-#+ Apply defaults and resolve every relative path in a parsed config.
+#+ Apply defaults, expand environment variables and resolve every relative
+#+ path in a parsed config.
 #+
 #+ Relative paths resolve against the config file's own directory, not the
 #+ current one, so a config means the same thing wherever the CLI is started
 #+ from — `fglpkg bdl` starts it inside the installed package.
+#+
+#+ `$NAME` and `${NAME}` in a path, a command line or a URL are replaced by the
+#+ environment variable's value (see expandEnv), the same way on every
+#+ platform; the shell no longer sees them, since every value is passed on
+#+ quoted literally. A variable that is not set is reported.
 #+
 #+ The FGLTEST_PORT environment variable, when set, overrides "port": concurrent
 #+ runs on one machine (CI jobs on a shared runner) can then each use their own
@@ -101,7 +114,7 @@ END RECORD
 #+ @return NULL when the config is usable, else what is wrong with it
 PUBLIC FUNCTION normalize(cfg Config INOUT, cfgPath STRING, programDir STRING)
     RETURNS STRING
-    DEFINE dir, env STRING
+    DEFINE dir, env, what STRING
     DEFINE i, p INTEGER
 
     LET env = fgl_getenv("FGLTEST_PORT")
@@ -113,11 +126,12 @@ PUBLIC FUNCTION normalize(cfg Config INOUT, cfgPath STRING, programDir STRING)
         END IF
         LET cfg.port = p
     END IF
-    # An absent "port" parses as NULL, not 0, so a bare `== 0` misses it.
-    IF cfg.port IS NULL OR cfg.port <= 0 THEN
+    # Only an absent "port" (which parses as NULL, not 0) takes the default:
+    # a zero or negative one is a mistake to report, not to paper over.
+    IF cfg.port IS NULL THEN
         LET cfg.port = server.DEFAULT_PORT
     END IF
-    IF cfg.port > server.MAX_PORT THEN
+    IF cfg.port <= 0 OR cfg.port > server.MAX_PORT THEN
         RETURN SFMT("\"port\" must be a port number (1-%1), not %2",
             server.MAX_PORT, cfg.port)
     END IF
@@ -125,6 +139,25 @@ PUBLIC FUNCTION normalize(cfg Config INOUT, cfgPath STRING, programDir STRING)
         LET cfg.reporters = "console,junit,json"
     END IF
     LET cfg.reporters = noSpaces(cfg.reporters)   -- "console, junit" is fine
+
+    LET m_unsetVar = NULL
+    LET cfg.outdir = expand(cfg.outdir, "\"outdir\"")
+    LET cfg.jsonRunner = expand(cfg.jsonRunner, "\"jsonRunner\"")
+    LET cfg.discover.dir = expand(cfg.discover.dir, "\"discover\".dir")
+    LET cfg.discover.workdir = expand(cfg.discover.workdir, "\"discover\".workdir")
+    LET cfg.discover.commandLine = expand(cfg.discover.commandLine, "\"discover\".commandLine")
+    LET cfg.discover.url = expand(cfg.discover.url, "\"discover\".url")
+    FOR i = 1 TO cfg.suites.getLength()
+        LET what = SFMT("suite #%1", i)
+        LET cfg.suites[i].module = expand(cfg.suites[i].module, what || " module")
+        LET cfg.suites[i].actions = expand(cfg.suites[i].actions, what || " actions")
+        LET cfg.suites[i].workdir = expand(cfg.suites[i].workdir, what || " workdir")
+        LET cfg.suites[i].commandLine = expand(cfg.suites[i].commandLine, what || " commandLine")
+        LET cfg.suites[i].url = expand(cfg.suites[i].url, what || " url")
+    END FOR
+    IF m_unsetVar IS NOT NULL THEN
+        RETURN m_unsetVar
+    END IF
 
     LET dir = os.Path.dirName(cfgPath)
     IF LENGTH(cfg.outdir) == 0 THEN
@@ -150,6 +183,103 @@ PUBLIC FUNCTION normalize(cfg Config INOUT, cfgPath STRING, programDir STRING)
             defaultWorkdir(cfg.suites[i].mode, cfg.suites[i].workdir))
     END FOR
     RETURN NULL
+END FUNCTION
+
+# expandEnv() for normalize(): the first unset variable is kept in m_unsetVar.
+PRIVATE FUNCTION expand(v STRING, what STRING) RETURNS STRING
+    DEFINE r, unset STRING
+    CALL expandEnv(v) RETURNING r, unset
+    IF unset IS NOT NULL AND m_unsetVar IS NULL THEN
+        LET m_unsetVar = SFMT("%1 uses the environment variable %2, which is not set", what, unset)
+    END IF
+    RETURN r
+END FUNCTION
+
+#+ Expand environment variables in a config value: `$NAME` and `${NAME}` become
+#+ the variable's value and `$$` a single `$`; a `$` not followed by a name
+#+ (`$5`, a lone `$`) is kept as it is.
+#+
+#+ @return the expanded value, and the name of the first variable that is not
+#+         set or is empty (NULL if none) — a path built from a missing
+#+         variable is a mistake to report, not an empty string to use
+PUBLIC FUNCTION expandEnv(s STRING) RETURNS (STRING, STRING)
+    DEFINE r base.StringBuffer
+    DEFINE start, d, e, j, len INTEGER
+    DEFINE name, missing, v STRING
+
+    IF s IS NULL THEN
+        RETURN NULL, NULL
+    END IF
+    # Only "$", "{", "}" and name characters — all ASCII — are inspected, and
+    # text is copied with subString(), so multibyte values pass through intact
+    # under either FGL_LENGTH_SEMANTICS.
+    LET r = base.StringBuffer.create()
+    LET len = s.getLength()
+    LET start = 1
+    WHILE start <= len
+        LET d = s.getIndexOf("$", start)
+        IF d == 0 THEN
+            EXIT WHILE
+        END IF
+        IF d > start THEN
+            CALL r.append(s.subString(start, d - 1))
+        END IF
+        LET name = NULL
+        LET start = d + 1
+        IF d < len THEN
+            CASE s.getCharAt(d + 1)
+                WHEN "$"
+                    CALL r.append("$")
+                    LET start = d + 2
+                    CONTINUE WHILE
+                WHEN "{"
+                    LET e = s.getIndexOf("}", d + 2)
+                    IF e > d + 2 THEN
+                        LET name = s.subString(d + 2, e - 1)
+                        LET start = e + 1
+                    END IF
+                OTHERWISE
+                    LET j = d + 1
+                    WHILE j <= len
+                        IF NOT isNameChar(s.getCharAt(j), j == d + 1) THEN
+                            EXIT WHILE
+                        END IF
+                        LET j = j + 1
+                    END WHILE
+                    IF j > d + 1 THEN
+                        LET name = s.subString(d + 1, j - 1)
+                        LET start = j
+                    END IF
+            END CASE
+        END IF
+        IF name IS NULL THEN
+            CALL r.append("$")   -- not a variable reference: keep it
+            CONTINUE WHILE
+        END IF
+        LET v = fgl_getenv(name)
+        IF LENGTH(v) == 0 THEN
+            IF missing IS NULL THEN
+                LET missing = name
+            END IF
+        ELSE
+            CALL r.append(v)
+        END IF
+    END WHILE
+    IF start <= len THEN
+        CALL r.append(s.subString(start, len))
+    END IF
+    RETURN r.toString(), missing
+END FUNCTION
+
+# A character of a variable name: a letter or "_", or a digit after the first.
+PRIVATE FUNCTION isNameChar(c STRING, first BOOLEAN) RETURNS BOOLEAN
+    IF c IS NULL THEN
+        RETURN FALSE
+    END IF
+    IF core.isTrue(first) THEN
+        RETURN c.matches("^[A-Za-z_]$")
+    END IF
+    RETURN c.matches("^[A-Za-z0-9_]$")
 END FUNCTION
 
 # "." for a tcp suite with no workdir (resolved to the config's directory).
@@ -193,14 +323,17 @@ END FUNCTION
 
 #+ Check a config for mistakes before anything runs, and describe them all at
 #+ once: an unknown key (the JSON parser would otherwise drop a typo like
-#+ "comandLine" silently), a suite without a name or reusing another's (suites
-#+ write their reports under their name), a suite naming both or neither of
-#+ module/actions, a module or action file that does not exist, an unknown mode
-#+ or reporter, a ua suite without a url, a negative timeout. Call it after
-#+ normalize(), which resolves the paths it checks.
+#+ "comandLine" silently — keys match without regard to case, as the parser
+#+ matches them), a value of the wrong type ("timeout": "30s" would become
+#+ NULL), a suite without a name or reusing another's (suites write their
+#+ reports under their name), a suite whose reports would overwrite the config
+#+ or an action file, both or neither of module/actions, a module or action
+#+ file that does not exist, an unknown mode or reporter, a ua suite without a
+#+ url, a negative timeout. Call it after normalize(), which resolves the paths
+#+ it checks.
 #+
 #+ @param cfgPath the config file (for the message)
-#+ @param text    the config's JSON text (for the key check)
+#+ @param text    the config's JSON text (for the key and type checks)
 #+ @param cfg     the parsed, normalized config
 #+ @return NULL when the config is valid, else a multi-line description
 PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STRING
@@ -210,7 +343,7 @@ PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STR
     DEFINE tok base.StringTokenizer
     DEFINE names DICTIONARY OF INTEGER
     DEFINE i INTEGER
-    DEFINE t, where, name STRING
+    DEFINE t, where, name, k, clash STRING
 
     LET b = base.StringBuffer.create()
     TRY
@@ -218,19 +351,23 @@ PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STR
     CATCH
         RETURN SFMT("config '%1' must be a JSON object", cfgPath)
     END TRY
-    CALL checkKeys(b, obj, "the config", TOP_KEYS)
+    CALL core.checkShape(b, obj, "the config", TOP_SPEC)
     # Check a type before reading through it: assigning an object to the wrong
     # class is a -1260 that TRY/CATCH does not catch.
-    IF obj.getType("discover") == "OBJECT" THEN
-        LET o = obj.get("discover")
-        CALL checkKeys(b, o, "\"discover\"", DISCOVER_KEYS)
+    LET k = core.jsonKey(obj, "discover")
+    IF k IS NOT NULL AND obj.getType(k) == "OBJECT" THEN
+        LET o = obj.get(k)
+        CALL core.checkShape(b, o, "\"discover\"", DISCOVER_SPEC)
     END IF
-    IF obj.getType("suites") == "ARRAY" THEN
-        LET arr = obj.get("suites")
+    LET k = core.jsonKey(obj, "suites")
+    IF k IS NOT NULL AND obj.getType(k) == "ARRAY" THEN
+        LET arr = obj.get(k)
         FOR i = 1 TO arr.getLength()
             IF arr.getType(i) == "OBJECT" THEN
                 LET o = arr.get(i)
-                CALL checkKeys(b, o, SFMT("suite #%1", i), SUITE_KEYS)
+                CALL core.checkShape(b, o, SFMT("suite #%1", i), SUITE_SPEC)
+            ELSE
+                CALL core.problem(b, SFMT("suite #%1 must be an object", i))
             END IF
         END FOR
     END IF
@@ -239,16 +376,16 @@ PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STR
     WHILE tok.hasMoreTokens()
         LET t = tok.nextToken()
         IF LENGTH(t) > 0 AND NOT inList(t, REPORTERS) THEN
-            CALL addProblem(b, SFMT("\"reporters\": unknown reporter '%1' (use %2)", t, REPORTERS))
+            CALL core.problem(b, SFMT("\"reporters\": unknown reporter '%1' (use %2)", t, REPORTERS))
         END IF
     END WHILE
     IF cfg.timeout < 0 THEN
-        CALL addProblem(b, "\"timeout\" cannot be negative")
+        CALL core.problem(b, "\"timeout\" cannot be negative")
     END IF
 
     IF LENGTH(cfg.discover.dir) > 0 THEN
         IF NOT os.Path.isDirectory(cfg.discover.dir) THEN
-            CALL addProblem(b, SFMT("\"discover\": directory '%1' not found", cfg.discover.dir))
+            CALL core.problem(b, SFMT("\"discover\": directory '%1' not found", cfg.discover.dir))
         END IF
         CALL checkConnection(b, "\"discover\"", cfg.discover.mode, cfg.discover.url)
     END IF
@@ -257,37 +394,41 @@ PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STR
         LET name = cfg.suites[i].name
         LET where = SFMT("suite #%1", i)
         IF LENGTH(name) == 0 THEN
-            CALL addProblem(b, SFMT("%1 has no \"name\"", where))
+            CALL core.problem(b, SFMT("%1 has no \"name\"", where))
         ELSE
             LET where = SFMT("suite '%1'", name)
             IF names.contains(name) THEN
-                CALL addProblem(b, SFMT("suite #%1 reuses the name '%2' of suite #%3 — suite names must be unique (they name the report files)",
+                CALL core.problem(b, SFMT("suite #%1 reuses the name '%2' of suite #%3 — suite names must be unique (they name the report files)",
                     i, name, names[name]))
             ELSE
                 LET names[name] = i
             END IF
+            LET clash = outputClash(cfg, cfgPath, name)
+            IF clash IS NOT NULL THEN
+                CALL core.problem(b, SFMT("%1: %2", where, clash))
+            END IF
         END IF
         IF LENGTH(cfg.suites[i].module) > 0 AND isActionSuite(cfg.suites[i]) THEN
-            CALL addProblem(b, SFMT("%1 names both a \"module\" and an \"actions\" file — use one", where))
+            CALL core.problem(b, SFMT("%1 names both a \"module\" and an \"actions\" file — use one", where))
         END IF
         IF LENGTH(cfg.suites[i].module) == 0 AND NOT isActionSuite(cfg.suites[i]) THEN
-            CALL addProblem(b, SFMT("%1 needs a \"module\" or an \"actions\" file", where))
+            CALL core.problem(b, SFMT("%1 needs a \"module\" or an \"actions\" file", where))
         END IF
         IF LENGTH(cfg.suites[i].module) > 0 THEN
             IF NOT os.Path.exists(cfg.suites[i].module)
                 AND NOT os.Path.exists(cfg.suites[i].module || ".42m") THEN
-                CALL addProblem(b, SFMT("%1: module '%2' not found (is it compiled?)",
+                CALL core.problem(b, SFMT("%1: module '%2' not found (is it compiled?)",
                     where, cfg.suites[i].module))
             END IF
         END IF
         IF isActionSuite(cfg.suites[i]) THEN
             IF NOT os.Path.exists(cfg.suites[i].actions) THEN
-                CALL addProblem(b, SFMT("%1: action file '%2' not found", where, cfg.suites[i].actions))
+                CALL core.problem(b, SFMT("%1: action file '%2' not found", where, cfg.suites[i].actions))
             END IF
         END IF
         CALL checkConnection(b, where, cfg.suites[i].mode, cfg.suites[i].url)
         IF cfg.suites[i].timeout < 0 THEN
-            CALL addProblem(b, SFMT("%1: \"timeout\" cannot be negative", where))
+            CALL core.problem(b, SFMT("%1: \"timeout\" cannot be negative", where))
         END IF
     END FOR
 
@@ -297,28 +438,64 @@ PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STR
     RETURN SFMT("config '%1' is not valid:%2%3", cfgPath, ASCII 10, b.toString())
 END FUNCTION
 
-# Report every key of `o` that is not in the comma-separated `known` list.
-PRIVATE FUNCTION checkKeys(b base.StringBuffer, o util.JSONObject, where STRING, known STRING)
-    DEFINE i INTEGER
-    DEFINE k STRING
-    FOR i = 1 TO o.getLength()
-        LET k = o.name(i)
-        IF k.getIndexOf("$", 1) == 1 OR k.getIndexOf("_", 1) == 1 THEN
-            CONTINUE FOR
+#+ Why suite `name` may not write its files into cfg.outdir, or NULL if it may.
+#+
+#+ A suite's reports and log are named after it, and the CLI deletes stale
+#+ copies before every run; a name that turns one of them into the config file,
+#+ an action file, the summary or the scenario-server log would destroy that
+#+ file before the suite even starts.
+PUBLIC FUNCTION outputClash(cfg Config, cfgPath STRING, name STRING) RETURNS STRING
+    DEFINE tok base.StringTokenizer
+    DEFINE f STRING
+    DEFINE j INTEGER
+
+    IF LENGTH(name) == 0 THEN
+        RETURN NULL
+    END IF
+    IF name.getIndexOf("/", 1) > 0 OR name.getIndexOf("\\", 1) > 0 THEN
+        RETURN "a suite name cannot contain a path separator: it names the report files"
+    END IF
+    IF name == "fgltest.summary" THEN
+        RETURN "the name 'fgltest.summary' is reserved: its report would replace fgltest.summary.json"
+    END IF
+    IF name == "ggcserver" THEN
+        RETURN "the name 'ggcserver' is reserved: its log would replace the scenario server's ggcserver.log"
+    END IF
+    LET tok = base.StringTokenizer.create(RUN_FILE_EXTS, ",")
+    WHILE tok.hasMoreTokens()
+        LET f = os.Path.join(cfg.outdir, name || tok.nextToken())
+        IF NOT os.Path.exists(f) THEN
+            CONTINUE WHILE
         END IF
-        IF NOT inList(k, known) THEN
-            CALL addProblem(b, SFMT("%1: unknown key \"%2\" (known keys: %3)", where, k, known))
+        IF sameFile(f, cfgPath) THEN
+            RETURN SFMT("its report '%1' would replace the config file — rename the suite or set \"outdir\"", f)
         END IF
-    END FOR
+        FOR j = 1 TO cfg.suites.getLength()
+            IF isActionSuite(cfg.suites[j]) THEN
+                IF sameFile(f, cfg.suites[j].actions) THEN
+                    RETURN SFMT("its report '%1' would replace the action file of suite '%2' — rename the suite or set \"outdir\"",
+                        f, cfg.suites[j].name)
+                END IF
+            END IF
+        END FOR
+    END WHILE
+    RETURN NULL
+END FUNCTION
+
+PRIVATE FUNCTION sameFile(a STRING, b STRING) RETURNS BOOLEAN
+    IF NOT os.Path.exists(a) OR NOT os.Path.exists(b) THEN
+        RETURN FALSE
+    END IF
+    RETURN core.isTrue(os.Path.isSameFile(a, b))
 END FUNCTION
 
 # A suite's (or the discovery template's) connection settings.
 PRIVATE FUNCTION checkConnection(b base.StringBuffer, where STRING, mode STRING, url STRING)
     IF LENGTH(mode) > 0 AND mode != "tcp" AND mode != "ua" THEN
-        CALL addProblem(b, SFMT("%1: unknown \"mode\" '%2' (use tcp or ua)", where, mode))
+        CALL core.problem(b, SFMT("%1: unknown \"mode\" '%2' (use tcp or ua)", where, mode))
     END IF
     IF isUa(mode) AND LENGTH(url) == 0 THEN
-        CALL addProblem(b, SFMT("%1: mode ua needs a \"url\"", where))
+        CALL core.problem(b, SFMT("%1: mode ua needs a \"url\"", where))
     END IF
 END FUNCTION
 
@@ -330,12 +507,6 @@ PRIVATE FUNCTION inList(item STRING, list STRING) RETURNS BOOLEAN
         RETURN TRUE
     END IF
     RETURN FALSE
-END FUNCTION
-
-PRIVATE FUNCTION addProblem(b base.StringBuffer, msg STRING)
-    CALL b.append("  - ")
-    CALL b.append(msg)
-    CALL b.append(ASCII 10)
 END FUNCTION
 
 # ------------------------------------------------------------- commands ----
@@ -395,26 +566,38 @@ END FUNCTION
 
 # ------------------------------------------------------------ run files ----
 
-#+ Delete the files a previous run of `rname` left in outdir. The CLI reads
-#+ `<rname>.json` and `<rname>.done` back after a suite exits, so a copy left
-#+ from an earlier run would be taken for this run's results — a suite that
-#+ never started would report the old run's passes.
-PUBLIC FUNCTION clearRunFiles(outdir STRING, rname STRING)
-    CALL deleteQuietly(SFMT("%1/%2.json", outdir, rname))
-    CALL deleteQuietly(SFMT("%1/%2.junit.xml", outdir, rname))
-    CALL deleteQuietly(SFMT("%1/%2.tap", outdir, rname))
-    CALL deleteQuietly(SFMT("%1/%2.done", outdir, rname))
+#+ Delete the reports and completion marker a previous run of `rname` left in
+#+ outdir. The CLI reads `<rname>.json` and `<rname>.done` back after a suite
+#+ exits, so a copy left from an earlier run would be taken for this run's
+#+ results — a suite that never started would report the old run's passes.
+#+
+#+ @return NULL, or which file could not be removed (it would be read back)
+PUBLIC FUNCTION clearRunFiles(outdir STRING, rname STRING) RETURNS STRING
+    DEFINE err STRING
+    LET err = removeFile(SFMT("%1/%2.json", outdir, rname))
+    IF err IS NULL THEN
+        LET err = removeFile(SFMT("%1/%2.junit.xml", outdir, rname))
+    END IF
+    IF err IS NULL THEN
+        LET err = removeFile(SFMT("%1/%2.tap", outdir, rname))
+    END IF
+    IF err IS NULL THEN
+        LET err = removeFile(SFMT("%1/%2.done", outdir, rname))
+    END IF
+    RETURN err
 END FUNCTION
 
 #+ Delete every per-test file an earlier isolated run of suite `name` left in
 #+ outdir (`<name>.<n>.*` for any n). Without this, a suite that now has fewer
-#+ tests keeps the old higher-numbered reports, and CI globs pick them up.
-PUBLIC FUNCTION clearIsolatedFiles(outdir STRING, name STRING)
+#+ tests, or now runs whole, keeps old per-test reports a CI glob picks up.
+#+
+#+ @return NULL, or which file could not be removed
+PUBLIC FUNCTION clearIsolatedFiles(outdir STRING, name STRING) RETURNS STRING
     DEFINE h INTEGER
-    DEFINE entry STRING
+    DEFINE entry, err STRING
     LET h = os.Path.dirOpen(outdir)
     IF h <= 0 THEN
-        RETURN
+        RETURN NULL
     END IF
     WHILE TRUE
         LET entry = os.Path.dirNext(h)
@@ -422,10 +605,28 @@ PUBLIC FUNCTION clearIsolatedFiles(outdir STRING, name STRING)
             EXIT WHILE
         END IF
         IF isIsolatedFile(entry, name) THEN
-            CALL deleteQuietly(os.Path.join(outdir, entry))
+            LET err = removeFile(os.Path.join(outdir, entry))
+            IF err IS NOT NULL THEN
+                EXIT WHILE
+            END IF
         END IF
     END WHILE
     CALL os.Path.dirClose(h)
+    RETURN err
+END FUNCTION
+
+#+ Remove a file. NULL if it is gone afterwards (or was never there), else a
+#+ message: a stale report that survives would be read back as new results.
+PUBLIC FUNCTION removeFile(path STRING) RETURNS STRING
+    DEFINE ok INTEGER
+    IF NOT os.Path.exists(path) THEN
+        RETURN NULL
+    END IF
+    LET ok = os.Path.delete(path)
+    IF os.Path.exists(path) THEN
+        RETURN SFMT("cannot remove '%1'", path)
+    END IF
+    RETURN NULL
 END FUNCTION
 
 #+ TRUE if `entry` is `<name>.<digits>.<ext>` for a file an isolated run writes.
@@ -455,14 +656,6 @@ PUBLIC FUNCTION isIsolatedFile(entry STRING, name STRING) RETURNS BOOLEAN
         WHEN "log" RETURN TRUE
     END CASE
     RETURN FALSE
-END FUNCTION
-
-#+ Remove a file, ignoring "not there" and permission problems.
-PUBLIC FUNCTION deleteQuietly(path STRING)
-    DEFINE ok INTEGER
-    IF os.Path.exists(path) THEN
-        LET ok = os.Path.delete(path)
-    END IF
 END FUNCTION
 
 # -------------------------------------------------------------- results ----

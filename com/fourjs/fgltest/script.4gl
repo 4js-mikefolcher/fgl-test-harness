@@ -66,6 +66,14 @@ PUBLIC TYPE ActionFile RECORD
 END RECORD
 
 PRIVATE DEFINE m_file ActionFile
+
+# The shape of an action file, object by object (see core.checkShape). "column"
+# and "row" reach the record through json_name, which the JSON parser matches
+# exactly, so they must be spelled exactly; other keys match without regard to
+# case, as the parser matches them.
+PRIVATE CONSTANT FILE_SPEC = "application:string,beforeAll:array,beforeEach:array,afterEach:array,afterAll:array,tests:array"
+PRIVATE CONSTANT TEST_SPEC = "name:string,skip:boolean,only:boolean,steps:array"
+PRIVATE CONSTANT STEP_SPEC = "command:string,target:string,=column:string,=row:int,value:any"
 # The command table: command -> requirement letters (see commandTable()).
 PRIVATE DEFINE m_commands DICTIONARY OF STRING
 
@@ -77,19 +85,110 @@ PRIVATE DEFINE m_commands DICTIONARY OF STRING
 #+ @return NULL on success, else a human-readable error message
 PUBLIC FUNCTION load(path STRING) RETURNS STRING
     DEFINE txt STRING
+    DEFINE b base.StringBuffer
+
     LET txt = readFile(path)
     IF txt IS NULL THEN
         RETURN SFMT("cannot read action file '%1'", path)
     END IF
+    # Parse onto a clean model: a member absent from this file must not keep
+    # the value an earlier load gave it.
+    LET m_file.application = NULL
+    CALL m_file.beforeAll.clear()
+    CALL m_file.beforeEach.clear()
+    CALL m_file.afterEach.clear()
+    CALL m_file.afterAll.clear()
+    CALL m_file.tests.clear()
     TRY
         CALL util.JSON.parse(txt, m_file)
     CATCH
         RETURN SFMT("invalid JSON in action file '%1'", path)
     END TRY
+
+    LET b = base.StringBuffer.create()
+    CALL checkShape(b, txt)
     IF m_file.application IS NULL OR LENGTH(m_file.application) == 0 THEN
-        RETURN SFMT("action file '%1' has no \"application\"", path)
+        CALL core.problem(b, "no \"application\"")
     END IF
-    RETURN checkModel(path)
+    CALL checkModel(b)
+    IF b.getLength() == 0 THEN
+        RETURN NULL
+    END IF
+    RETURN SFMT("action file '%1' is not valid:%2%3", path, ASCII 10, b.toString())
+END FUNCTION
+
+# Unknown keys and wrongly typed values, read from the raw JSON: the parser
+# drops a key it cannot place ("skipp": true would run the test) and turns a
+# value of the wrong type into NULL or truncates it ("row": 1.5 is row 1).
+PRIVATE FUNCTION checkShape(b base.StringBuffer, txt STRING)
+    DEFINE obj, t util.JSONObject
+    DEFINE arr util.JSONArray
+    DEFINE i INTEGER
+    DEFINE k, where STRING
+
+    TRY
+        LET obj = util.JSONObject.parse(txt)
+    CATCH
+        CALL core.problem(b, "the file must hold a JSON object")
+        RETURN
+    END TRY
+    CALL core.checkShape(b, obj, "the file", FILE_SPEC)
+    CALL checkStepShapes(b, obj, "beforeAll", "beforeAll")
+    CALL checkStepShapes(b, obj, "beforeEach", "beforeEach")
+    CALL checkStepShapes(b, obj, "afterEach", "afterEach")
+    CALL checkStepShapes(b, obj, "afterAll", "afterAll")
+    # Check a type before reading through it: assigning an object to the wrong
+    # class is a -1260 that TRY/CATCH does not catch.
+    LET k = core.jsonKey(obj, "tests")
+    IF k IS NULL OR obj.getType(k) != "ARRAY" THEN
+        RETURN
+    END IF
+    LET arr = obj.get(k)
+    FOR i = 1 TO arr.getLength()
+        IF arr.getType(i) != "OBJECT" THEN
+            CALL core.problem(b, SFMT("test #%1 must be an object", i))
+            CONTINUE FOR
+        END IF
+        LET t = arr.get(i)
+        LET where = testLabel(t, i)
+        CALL core.checkShape(b, t, where, TEST_SPEC)
+        CALL checkStepShapes(b, t, "steps", where)
+    END FOR
+END FUNCTION
+
+# The shape of each step in the list `o` holds under `key` (if it holds one).
+PRIVATE FUNCTION checkStepShapes(b base.StringBuffer, o util.JSONObject, key STRING, where STRING)
+    DEFINE arr util.JSONArray
+    DEFINE st util.JSONObject
+    DEFINE j INTEGER
+    DEFINE k STRING
+
+    LET k = core.jsonKey(o, key)
+    IF k IS NULL OR o.getType(k) != "ARRAY" THEN
+        RETURN
+    END IF
+    LET arr = o.get(k)
+    FOR j = 1 TO arr.getLength()
+        IF arr.getType(j) == "OBJECT" THEN
+            LET st = arr.get(j)
+            CALL core.checkShape(b, st, SFMT("%1 step %2", where, j), STEP_SPEC)
+        ELSE
+            CALL core.problem(b, SFMT("%1 step %2 must be an object", where, j))
+        END IF
+    END FOR
+END FUNCTION
+
+# "test 'name'" when the test object has a string name, else "test #i".
+PRIVATE FUNCTION testLabel(t util.JSONObject, i INTEGER) RETURNS STRING
+    DEFINE k, name STRING
+    LET k = core.jsonKey(t, "name")
+    IF k IS NOT NULL THEN
+        IF t.getType(k) == "STRING" THEN
+            LET name = t.get(k)
+            RETURN SFMT("test '%1'", name)
+        END IF
+    END IF
+    RETURN SFMT("test #%1", i)
 END FUNCTION
 
 # ------------------------------------------------------------ validate ----
@@ -100,15 +199,12 @@ END FUNCTION
 #+ every problem at once instead of failing one test deep into a run that has
 #+ already started an application.
 #+
-#+ @param path the action-file path (for the message)
-#+ @return NULL when valid, else a multi-line description of every problem
-PRIVATE FUNCTION checkModel(path STRING) RETURNS STRING
-    DEFINE b base.StringBuffer
+#+ @param b collects one "  - " line per problem
+PRIVATE FUNCTION checkModel(b base.StringBuffer)
     DEFINE i, n INTEGER
     DEFINE seen DICTIONARY OF INTEGER
     DEFINE name STRING
 
-    LET b = base.StringBuffer.create()
     CALL checkSteps(b, "beforeAll", m_file.beforeAll)
     CALL checkSteps(b, "beforeEach", m_file.beforeEach)
     CALL checkSteps(b, "afterEach", m_file.afterEach)
@@ -138,11 +234,6 @@ PRIVATE FUNCTION checkModel(path STRING) RETURNS STRING
         END IF
         CALL checkSteps(b, SFMT("test '%1'", name), m_file.tests[i].steps)
     END FOR
-
-    IF b.getLength() == 0 THEN
-        RETURN NULL
-    END IF
-    RETURN SFMT("action file '%1' is not valid:%2%3", path, ASCII 10, b.toString())
 END FUNCTION
 
 PRIVATE FUNCTION checkSteps(b base.StringBuffer, where STRING, steps StepList)
@@ -164,6 +255,9 @@ PRIVATE FUNCTION checkSteps(b base.StringBuffer, where STRING, steps StepList)
         IF needs(req, "r") AND (steps[i].rowNum IS NULL OR steps[i].rowNum < 1) THEN
             CALL addProblem(b, SFMT("%1: command '%2' needs a \"row\" (1 or more)", at, steps[i].command))
         END IF
+        IF NOT needs(req, "r") AND steps[i].rowNum < 1 THEN
+            CALL addProblem(b, SFMT("%1: \"row\" must be 1 or more", at))
+        END IF
         IF needs(req, "v") AND steps[i].value IS NULL THEN
             CALL addProblem(b, SFMT("%1: command '%2' needs a \"value\"", at, steps[i].command))
         ELSE
@@ -178,9 +272,7 @@ PRIVATE FUNCTION checkSteps(b base.StringBuffer, where STRING, steps StepList)
 END FUNCTION
 
 PRIVATE FUNCTION addProblem(b base.StringBuffer, msg STRING)
-    CALL b.append("  - ")
-    CALL b.append(msg)
-    CALL b.append(ASCII 10)
+    CALL core.problem(b, msg)
 END FUNCTION
 
 # The command table: every command an action file may use, and what it

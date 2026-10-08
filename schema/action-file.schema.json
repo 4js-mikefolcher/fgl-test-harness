@@ -67,8 +67,19 @@
           "description": "Focus the run: if any test sets only, every other test is skipped."
         },
         "steps": {
-          "$ref": "#/$defs/steps"
+          "allOf": [
+            {
+              "$ref": "#/$defs/steps"
+            },
+            {
+              "minItems": 1
+            }
+          ],
+          "description": "The test's steps, at least one."
         }
+      },
+      "patternProperties": {
+        "^[$_]": {}
       }
     },
     "steps": {
@@ -142,8 +153,11 @@
           "description": "1-based table row."
         },
         "value": {
-          "type": "string",
-          "description": "The expected value, or the argument for an interaction verb. Counts, row numbers and pause delays are whole numbers written as strings, e.g. \"5\"."
+          "type": [
+            "string",
+            "number"
+          ],
+          "description": "The expected value, or the argument for an interaction verb. Counts, row numbers and pause delays are whole numbers, written as \"5\" or 5."
         }
       },
       "allOf": [
@@ -308,12 +322,28 @@
           "then": {
             "properties": {
               "value": {
-                "pattern": "^[0-9]{1,9}$"
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9]{1,9}$"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 999999999
+                  }
+                ]
               }
             }
           }
         }
-      ]
+      ],
+      "patternProperties": {
+        "^[$_]": {}
+      }
     }
+  },
+  "patternProperties": {
+    "^[$_]": {}
   }
 }

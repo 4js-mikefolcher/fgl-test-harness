@@ -208,14 +208,20 @@ either a compiled `module` **or** a JSON `actions` file:
   `discover.dir`, `discover.workdir`) resolve against the **config file's
   directory**, not the current one. `outdir` defaults to that directory.
 - The config is **validated before anything runs**: an unknown key (a typo like
-  `comandLine` would otherwise be ignored), a suite without a name or reusing
-  another's, a missing `module` / `actions` file, an unknown `mode` or reporter,
-  a `ua` suite without a `url`. Every problem is listed, and the CLI exits 2.
+  `comandLine` would otherwise be ignored; keys match without regard to case,
+  as the JSON parser matches them), a value of the wrong type (`"timeout":
+  "30s"` would otherwise become NULL), a suite without a name or reusing
+  another's, a suite whose reports would overwrite the config or an action
+  file, a missing `module` / `actions` file, an unknown `mode` or reporter, a
+  `ua` suite without a `url`. Every problem is listed, and the CLI exits 2.
   Keys starting with `$` or `_` are allowed, for `$schema` or comments.
+- **Environment variables**: `$NAME` and `${NAME}` in a path, command line or
+  URL are expanded by fgltest itself, the same way on every platform (`$$` is a
+  literal `$`); a variable that is not set is a config error. Values are then
+  passed to the suite exactly as they are.
 - `workdir` defaults to the config's directory; `commandLine` defaults to
-  GGC's `fglrun <application>`. The command line reaches GGC exactly as
-  written (on POSIX the shell still expands `$VAR`), and **GGC splits it at
-  spaces without honouring quotes**, so an argument cannot contain a space.
+  GGC's `fglrun <application>`. **GGC splits the command line at spaces without
+  honouring quotes**, so an application argument cannot contain a space.
 - `port` (default `6500`) is the scenario-server port; the CLI starts the server
   on it and passes it to every suite. The `FGLTEST_PORT` environment variable
   overrides it. If a server is already listening on the port, the CLI uses it
@@ -373,6 +379,11 @@ The test is then reported as `runtime error -8083: Null pointer exception.`, its
 those functions are raised too, rather than silently yielding NULL.) Without the
 opt-in, BDL stops the program on the spot; the reports then mark that test as
 "did not complete" and the rest as "not run", and the CLI fails the run.
+
+Some errors can **never** be trapped, opt-in or not: BDL's non-trappable errors
+— `-1326` (array index out of bounds) among them — stop the program wherever
+they occur. They end the suite the same way: that test "did not complete", the
+rest "not run", and the run fails.
 
 **The application going away.** When the application under test ends
 mid-run, the test that hits it errors (`GGC-12 The scenario has already ended`)

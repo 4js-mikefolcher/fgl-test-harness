@@ -14,9 +14,10 @@ _Nothing yet._
 Hardening for distribution. A run can no longer pass when a suite crashed, was
 killed or never started; the installed package works out of the box; config
 and action-file mistakes are reported before anything runs; and every report
-format is consistent and parseable. Two behaviours change for existing users —
-config paths are relative to the config file, and the JSON report's `failed`
-no longer includes errors — see **Changed**.
+format is consistent and parseable. A few behaviours change for existing
+users — config paths are relative to the config file, the JSON report's
+`failed` no longer includes errors, and fgltest expands `$NAME` in config
+values itself — see **Changed**.
 
 ### Fixed
 
@@ -36,8 +37,9 @@ no longer includes errors — see **Changed**.
   - a watchdog **timeout** now fails the run too (it used to be reported but
     leave the exit code at 0 when the partial results passed).
 - **Results from an earlier run can no longer stand in for this one.** Before
-  running a suite the CLI deletes its previous `<name>.json` / `.junit.xml` /
-  `.tap` / `.done` (and, for an isolated suite, every old `<name>.<n>.*`). A
+  anything runs, the CLI deletes every suite's previous `<name>.json` /
+  `.junit.xml` / `.tap` / `.done` and every old per-test `<name>.<n>.*`,
+  whichever mode ran last; a file it cannot delete stops the run (exit 2). A
   suite whose module was missing used to report the previous run's passes and
   exit 0.
 - **JSON suites work from an installed package.** The default `jsonRunner` was
@@ -75,12 +77,16 @@ no longer includes errors — see **Changed**.
 - **The CLI no longer stops a scenario server it did not start.** A server
   already listening on the port — a developer's own, or another run's — is
   reused and left running, and the timeout watchdog no longer restarts it.
-- **Action files are checked for table and number mistakes.** A table
-  command missing its `column` or `row` (or with a row below 1), and a count or
-  delay that is not a whole number (`"value": "five"`), used to load cleanly and
-  then fail at run time with a confusing message — a non-number silently became
-  NULL. They are now reported at load with the other problems. The JSON Schema
-  carries the same rules, and a self-test keeps it in step with the loader.
+- **Action files are checked for table, number and key mistakes.** A table
+  command missing its `column` or `row`, a row below 1 or not a whole number
+  (`"row": 1.5` was row 1), a count or delay that is not a whole number
+  (`"value": "five"` silently became NULL), and an unknown key (`"skipp": true`
+  ran the test) used to load cleanly. They are now reported at load with the
+  other problems. Keys match without regard to case, as the JSON parser
+  matches them, except `column` / `row` (exact, like the parser). The JSON
+  Schema carries the same rules — test `steps` may not be empty, values may be
+  strings or numbers, `$`/`_` keys are allowed — and a self-test keeps its
+  per-command rules in step with the loader.
 - **A test name used twice no longer runs twice.** Isolate mode selected tests
   by name, so two tests sharing one were each run (and counted) under both
   processes. An action file with a repeated name is now rejected at load; in a
@@ -89,22 +95,30 @@ no longer includes errors — see **Changed**.
 - **The TAP diagnostic block is valid YAML.** It repeated a `message:` key per
   message and left values unquoted, so a message with a `:` or `#` broke
   strict consumers. It now has `severity`, `message` and a `messages` list, all
-  quoted; a `#` in a test name is escaped so it is not read as a directive.
+  quoted, with control characters (DEL included) dropped; a `#` in a test name
+  is escaped so it is not read as a directive.
+- **JUnit reports drop control characters XML forbids.** An ESC or form feed
+  in an application's message made the whole report unparseable.
 - **`fgltest.json` mistakes are reported instead of ignored.** A typo'd key was
   dropped silently by the JSON parser (`"comandLine"`: the suite then ran with
-  no command line). The config is now checked before anything starts — unknown
-  keys, suites without or reusing a name (their reports overwrote each other),
-  both or neither of `module` / `actions`, a missing module or action file, an
-  unknown `mode` or reporter, `ua` without a `url`, a negative `timeout` — with
-  every problem listed and exit code 2. A discovered suite whose name is taken
-  is skipped with a note.
+  no command line), and a wrongly typed value became NULL (`"timeout": "30s"`).
+  The config is now checked before anything starts — unknown keys (matched
+  without regard to case, as the parser does), wrongly typed values, suites
+  without or reusing a name (their reports overwrote each other), a suite whose
+  reports would overwrite the config or an action file (a suite named
+  `fgltest` used to replace `fgltest.json`), reserved names, both or neither of
+  `module` / `actions`, a missing module or action file, an unknown `mode` or
+  reporter, `ua` without a `url`, a negative `timeout` — with every problem
+  listed and exit code 2. A discovered suite whose name is taken, or whose
+  reports would clash, is skipped with a note.
 - **Values in suite commands are quoted properly.** The command line, working
   directory, URL and paths were wrapped in `"…"` unescaped: a `commandLine`
   with quotes of its own broke the suite command, and on Windows a `workdir`
   ending in `\` swallowed the closing quote. They are now quoted for the
-  platform's shell (`core.shellArg`). Note that GGC itself splits the command
-  line at spaces without honouring quotes, so an application argument still
-  cannot contain a space.
+  platform's shell (`core.shellArg`) and arrive exactly as written — quotes,
+  backslashes, `$`, backticks and non-ASCII text alike. Note that GGC itself
+  splits the command line at spaces without honouring quotes, so an
+  application argument still cannot contain a space.
 - **`inspect.fields()` and `inspect.tables()` read the current window only.**
   They searched the whole AUI tree, which keeps every open window, so inside a
   modal child window they also returned the parent's fields and tables
@@ -137,11 +151,18 @@ no longer includes errors — see **Changed**.
 - `"reporters"` tolerates spaces (`"console, junit"`).
 - The manifest's Genero range is `^6.0.0` (was `>=6.0.0`): the shipped `.42m`
   files are built for Genero 6, so a future 7.x is not claimed.
-- **The application ending stops the run at once.** GGC's `ILLEGAL_STATE`
-  (`GGC-12 The scenario has already ended`) is now treated like a closed
+- **The application ending stops the run at once.** GGC's
+  `GGC-12 The scenario has already ended` is now treated like a closed
   session: the test that hit it errors and the remaining tests are reported
   `not run: the application under test ended`, instead of each one erroring on
-  its first interaction.
+  its first interaction. (Other `ILLEGAL_STATE` reports, such as a DVM still
+  processing, only error the test that hit them.)
+- **`$NAME` and `${NAME}` in config values are expanded by fgltest**, in paths,
+  command lines and URLs, the same way on every platform (`$$` for a literal
+  `$`), and an unset variable is a config error. Before, the POSIX shell
+  expanded `$VAR` in a `commandLine` (an unset one became empty), not at all on
+  Windows, and not in a `module` or `workdir` once they were quoted.
+- A `port` of 0 or below is an error; only an absent `port` defaults to 6500.
 - The failure note forwarded to GGC for an errored test gives its cause
   instead of `0/0 checks failed`.
 
@@ -157,6 +178,11 @@ no longer includes errors — see **Changed**.
 - `script.requirements(command)` / `script.commands()` — the action-file
   command table, for tooling. `core.shellArg(s)` / `core.quoteArg(s, windows)`
   — quote one argument for a command run with `RUN`.
+- `cli.expandEnv(s)`; `core.checkShape(b, o, where, spec)` / `core.jsonKey()` /
+  `core.problem()` — the JSON shape checks both validators use;
+  `ggcdriver.sessionOver(code, msg)` — which GGC statuses end the session.
+- `make check` runs the self-tests under both `FGL_LENGTH_SEMANTICS=BYTE` (the
+  default) and `CHAR`.
 - `server.ensure(port, idle, timeout)` — starts a scenario server only if none
   is listening, and says whether it did. `driver.CURRENT_WINDOW` — the
   `auiPart()` selector for the current window.

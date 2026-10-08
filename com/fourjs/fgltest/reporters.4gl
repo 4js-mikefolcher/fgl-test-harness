@@ -272,41 +272,47 @@ PRIVATE FUNCTION tapDescription(s STRING) RETURNS STRING
 END FUNCTION
 
 # A double-quoted YAML scalar: backslash, quote and line breaks escaped, other
-# control characters dropped.
+# control characters (DEL included, which YAML forbids too) dropped. Built with
+# StringBuffer.replace(), which leaves multibyte text intact under either
+# FGL_LENGTH_SEMANTICS; a getCharAt() walk would split it under BYTE.
 PRIVATE FUNCTION yamlString(s STRING) RETURNS STRING
-    DEFINE b base.StringBuffer
-    DEFINE i INTEGER
-    DEFINE c STRING
-    LET b = base.StringBuffer.create()
-    CALL b.append('"')
-    FOR i = 1 TO s.getLength()
-        LET c = s.getCharAt(i)
-        CASE
-            WHEN c == "\\"
-                CALL b.append("\\\\")
-            WHEN c == '"'
-                CALL b.append('\\"')
-            WHEN c == ASCII 10
-                CALL b.append("\\n")
-            WHEN c == ASCII 9
-                CALL b.append("\\t")
-            WHEN c == ASCII 13
-                CALL b.append("\\r")
-            WHEN ORD(c) < 32
-                -- other control characters have no place in a message
-            OTHERWISE
-                CALL b.append(c)
-        END CASE
-    END FOR
-    CALL b.append('"')
-    RETURN b.toString()
+    DEFINE e, r base.StringBuffer
+
+    LET e = base.StringBuffer.create()
+    CALL e.append(s)
+    CALL e.replace("\\", "\\\\", 0)   -- first, so later escapes stay single
+    CALL e.replace('"', '\\"', 0)
+    CALL e.replace(ASCII 10, "\\n", 0)
+    CALL e.replace(ASCII 13, "\\r", 0)
+    CALL e.replace(ASCII 9, "\\t", 0)
+    CALL dropControls(e)
+    LET r = base.StringBuffer.create()
+    CALL r.append('"')
+    CALL r.append(e.toString())
+    CALL r.append('"')
+    RETURN r.toString()
 END FUNCTION
 
-#+ Escape a string for XML text/attribute content.
+# Remove the C0 control characters other than TAB, LF and CR, and DEL: none of
+# them may appear in a YAML scalar or an XML 1.0 document.
+PRIVATE FUNCTION dropControls(e base.StringBuffer)
+    DEFINE k INTEGER
+    FOR k = 1 TO 31
+        IF k != 9 AND k != 10 AND k != 13 THEN
+            CALL e.replace(ASCII k, "", 0)
+        END IF
+    END FOR
+    CALL e.replace(ASCII 127, "", 0)
+END FUNCTION
+
+#+ Escape a string for XML text/attribute content. Control characters XML 1.0
+#+ does not allow (an ESC or form feed in an application message, say) are
+#+ dropped: one would make the whole report unparseable.
 PRIVATE FUNCTION xmlEsc(s STRING) RETURNS STRING
     DEFINE b base.StringBuffer
     LET b = base.StringBuffer.create()
     CALL b.append(s)
+    CALL dropControls(b)
     CALL b.replace("&", "&amp;", 0)
     CALL b.replace("<", "&lt;", 0)
     CALL b.replace(">", "&gt;", 0)

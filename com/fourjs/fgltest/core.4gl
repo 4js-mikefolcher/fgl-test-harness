@@ -92,58 +92,251 @@ END FUNCTION
 
 #+ `s` as one double-quoted argument for a command run with RUN, quoted by the
 #+ rules of sh on POSIX systems and of the C runtime's argument parser on
-#+ Windows, so a value holding quotes, backslashes or spaces arrives intact. On
-#+ POSIX, `$VAR` still expands, as in any double-quoted shell argument.
+#+ Windows, so the value arrives exactly as given — quotes, backslashes, `$`
+#+ and backticks included. (fgltest expands `$NAME` in config values itself,
+#+ before quoting; see cli.expandEnv.)
 PUBLIC FUNCTION shellArg(s STRING) RETURNS STRING
     RETURN quoteArg(s, os.Path.separator() == "\\")
 END FUNCTION
 
 #+ shellArg() for a given platform (windows = TRUE for the Windows rules).
+#+
+#+ Built only from getIndexOf(), subString() and StringBuffer.replace(), which
+#+ agree on positions under either FGL_LENGTH_SEMANTICS. Walking getCharAt() up
+#+ to getLength() would split multibyte characters under BYTE semantics (the
+#+ default), corrupting any non-ASCII path.
 PUBLIC FUNCTION quoteArg(s STRING, windows BOOLEAN) RETURNS STRING
-    DEFINE b base.StringBuffer
-    DEFINE i, k, slashes INTEGER
-    DEFINE c STRING
+    DEFINE e, r base.StringBuffer
 
-    LET b = base.StringBuffer.create()
-    CALL b.append('"')
+    LET e = base.StringBuffer.create()
     IF isTrue(windows) THEN
-        # Backslashes are literal unless they precede a quote: then each one
-        # is doubled and the quote escaped. Trailing ones are doubled so they
-        # cannot escape the closing quote.
-        LET slashes = 0
-        FOR i = 1 TO s.getLength()
-            LET c = s.getCharAt(i)
-            IF c == "\\" THEN
-                LET slashes = slashes + 1
-                CONTINUE FOR
-            END IF
-            IF c == '"' THEN
-                FOR k = 1 TO slashes * 2 + 1
-                    CALL b.append("\\")
-                END FOR
-            ELSE
-                FOR k = 1 TO slashes
-                    CALL b.append("\\")
-                END FOR
-            END IF
-            LET slashes = 0
-            CALL b.append(c)
-        END FOR
-        FOR k = 1 TO slashes * 2
-            CALL b.append("\\")
-        END FOR
+        CALL e.append(windowsEscape(s))
     ELSE
-        # Inside double quotes sh gives \ and " meaning: escape both.
-        FOR i = 1 TO s.getLength()
-            LET c = s.getCharAt(i)
-            IF c == "\\" OR c == '"' THEN
-                CALL b.append("\\")
-            END IF
-            CALL b.append(c)
+        # Inside double quotes sh gives \ " $ and ` meaning: escape them all.
+        CALL e.append(s)
+        CALL e.replace("\\", "\\\\", 0)
+        CALL e.replace('"', '\\"', 0)
+        CALL e.replace("$", "\\$", 0)
+        CALL e.replace("`", "\\`", 0)
+    END IF
+    LET r = base.StringBuffer.create()
+    CALL r.append('"')
+    CALL r.append(e.toString())
+    CALL r.append('"')
+    RETURN r.toString()
+END FUNCTION
+
+# The C runtime's rule: backslashes are literal unless they precede a quote;
+# then each is doubled and the quote escaped. Trailing backslashes are doubled
+# too, so they cannot escape the closing quote. Only ASCII positions are
+# inspected, so multibyte text is copied through untouched.
+PRIVATE FUNCTION windowsEscape(s STRING) RETURNS STRING
+    DEFINE r base.StringBuffer
+    DEFINE start, q, n, k, len INTEGER
+
+    LET r = base.StringBuffer.create()
+    LET len = s.getLength()
+    LET start = 1
+    WHILE start <= len
+        LET q = s.getIndexOf('"', start)
+        IF q == 0 THEN
+            EXIT WHILE
+        END IF
+        LET n = backslashesBefore(s, q, start)
+        IF q > start THEN
+            CALL r.append(s.subString(start, q - 1))   -- includes those n
+        END IF
+        FOR k = 1 TO n + 1
+            CALL r.append("\\")
+        END FOR
+        CALL r.append('"')
+        LET start = q + 1
+    END WHILE
+    IF start <= len THEN
+        CALL r.append(s.subString(start, len))
+        LET n = backslashesBefore(s, len + 1, start)
+        FOR k = 1 TO n
+            CALL r.append("\\")
         END FOR
     END IF
-    CALL b.append('"')
-    RETURN b.toString()
+    RETURN r.toString()
+END FUNCTION
+
+# How many backslashes run up to (not including) position pos, from no
+# earlier than position floor.
+PRIVATE FUNCTION backslashesBefore(s STRING, pos INTEGER, floor INTEGER) RETURNS INTEGER
+    DEFINE n, i INTEGER
+    LET n = 0
+    LET i = pos - 1
+    WHILE i >= floor
+        IF s.getCharAt(i) != "\\" THEN
+            EXIT WHILE
+        END IF
+        LET n = n + 1
+        LET i = i - 1
+    END WHILE
+    RETURN n
+END FUNCTION
+
+# ----------------------------------------------------------- JSON shape ----
+
+#+ Check a parsed JSON object against a shape, appending a "  - " line to `b`
+#+ for every problem: a key the shape does not list (a typo the JSON parser
+#+ would otherwise drop silently), or a value of the wrong type (which the
+#+ parser would turn into NULL, or truncate).
+#+
+#+ `spec` is a comma-separated list of key:type, type being string, number,
+#+ int (a whole number), boolean, object, array or any. Keys match without
+#+ regard to case, as util.JSON.parse matches them to record members; a key
+#+ written "=key" must match exactly, for a member renamed with json_name,
+#+ which the parser matches exactly. Keys starting with "$" or "_" (a
+#+ "$schema", a "_comment") are always allowed; a JSON null is always accepted.
+PUBLIC FUNCTION checkShape(b base.StringBuffer, o util.JSONObject, where STRING, spec STRING)
+    DEFINE i INTEGER
+    DEFINE k, expected, actual STRING
+
+    FOR i = 1 TO o.getLength()
+        LET k = o.name(i)
+        IF k.getIndexOf("$", 1) == 1 OR k.getIndexOf("_", 1) == 1 THEN
+            CONTINUE FOR
+        END IF
+        LET expected = specType(spec, k)
+        IF expected IS NULL THEN
+            CALL problem(b, SFMT('%1: unknown key "%2" (known keys: %3)', where, k, specKeys(spec)))
+            CONTINUE FOR
+        END IF
+        LET actual = o.getType(k)
+        IF actual == "NULL" OR expected == "any" THEN
+            CONTINUE FOR
+        END IF
+        IF NOT typeFits(o, k, expected, actual) THEN
+            CALL problem(b, SFMT('%1: "%2" must be %3, not %4', where, k,
+                describeType(expected), describeValue(o, k, actual)))
+        END IF
+    END FOR
+END FUNCTION
+
+#+ The key of `o` that matches `name` without regard to case (NULL if none),
+#+ for reading a member the way util.JSON.parse would.
+PUBLIC FUNCTION jsonKey(o util.JSONObject, name STRING) RETURNS STRING
+    DEFINE i INTEGER
+    DEFINE k STRING
+    FOR i = 1 TO o.getLength()
+        LET k = o.name(i)
+        IF k.toLowerCase() == name.toLowerCase() THEN
+            RETURN k
+        END IF
+    END FOR
+    RETURN NULL
+END FUNCTION
+
+#+ Append one "  - msg" problem line, the format every validator reports in.
+PUBLIC FUNCTION problem(b base.StringBuffer, msg STRING)
+    CALL b.append("  - ")
+    CALL b.append(msg)
+    CALL b.append(ASCII 10)
+END FUNCTION
+
+# The type `spec` gives key k (NULL if the key is not in it).
+PRIVATE FUNCTION specType(spec STRING, k STRING) RETURNS STRING
+    DEFINE tok base.StringTokenizer
+    DEFINE entry, key STRING
+    DEFINE colon INTEGER
+    DEFINE exact BOOLEAN
+
+    LET tok = base.StringTokenizer.create(spec, ",")
+    WHILE tok.hasMoreTokens()
+        LET entry = tok.nextToken()
+        LET colon = entry.getIndexOf(":", 1)
+        LET key = entry.subString(1, colon - 1)
+        LET exact = (key.getIndexOf("=", 1) == 1)
+        IF exact THEN
+            LET key = key.subString(2, key.getLength())
+            IF key == k THEN
+                RETURN entry.subString(colon + 1, entry.getLength())
+            END IF
+        ELSE
+            IF key.toLowerCase() == k.toLowerCase() THEN
+                RETURN entry.subString(colon + 1, entry.getLength())
+            END IF
+        END IF
+    END WHILE
+    RETURN NULL
+END FUNCTION
+
+# The keys of `spec`, for a message.
+PRIVATE FUNCTION specKeys(spec STRING) RETURNS STRING
+    DEFINE tok base.StringTokenizer
+    DEFINE entry, key STRING
+    DEFINE r base.StringBuffer
+
+    LET r = base.StringBuffer.create()
+    LET tok = base.StringTokenizer.create(spec, ",")
+    WHILE tok.hasMoreTokens()
+        LET entry = tok.nextToken()
+        LET key = entry.subString(1, entry.getIndexOf(":", 1) - 1)
+        IF key.getIndexOf("=", 1) == 1 THEN
+            LET key = key.subString(2, key.getLength())
+        END IF
+        IF r.getLength() > 0 THEN
+            CALL r.append(", ")
+        END IF
+        CALL r.append(key)
+    END WHILE
+    RETURN r.toString()
+END FUNCTION
+
+PRIVATE FUNCTION typeFits(o util.JSONObject, k STRING, expected STRING, actual STRING) RETURNS BOOLEAN
+    DEFINE f FLOAT
+    DEFINE n BIGINT
+    CASE expected
+        WHEN "string" RETURN (actual == "STRING")
+        WHEN "number" RETURN (actual == "NUMBER")
+        WHEN "boolean" RETURN (actual == "BOOLEAN")
+        WHEN "object" RETURN (actual == "OBJECT")
+        WHEN "array" RETURN (actual == "ARRAY")
+        WHEN "int"
+            IF actual != "NUMBER" THEN
+                RETURN FALSE
+            END IF
+            LET f = o.get(k)
+            LET n = f
+            IF n IS NULL OR n != f THEN
+                RETURN FALSE
+            END IF
+            RETURN TRUE
+    END CASE
+    RETURN FALSE
+END FUNCTION
+
+PRIVATE FUNCTION describeType(t STRING) RETURNS STRING
+    CASE t
+        WHEN "string" RETURN "a string"
+        WHEN "number" RETURN "a number"
+        WHEN "int" RETURN "a whole number"
+        WHEN "boolean" RETURN "true or false"
+        WHEN "object" RETURN "an object"
+        WHEN "array" RETURN "a list"
+    END CASE
+    RETURN t
+END FUNCTION
+
+# A value as a message shows it: a scalar with its text, a container by kind.
+PRIVATE FUNCTION describeValue(o util.JSONObject, k STRING, actual STRING) RETURNS STRING
+    DEFINE v STRING
+    DEFINE f FLOAT
+    CASE actual
+        WHEN "STRING"
+            LET v = o.get(k)
+            RETURN SFMT('the string "%1"', v)
+        WHEN "NUMBER"
+            LET f = o.get(k)
+            RETURN SFMT("%1", f)
+        WHEN "BOOLEAN" RETURN "a boolean"
+        WHEN "OBJECT" RETURN "an object"
+        WHEN "ARRAY" RETURN "a list"
+    END CASE
+    RETURN actual
 END FUNCTION
 
 # ------------------------------------------------------- driver errors ----

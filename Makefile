@@ -32,7 +32,7 @@ PROGS   := fgltest fgltest_json
 
 TESTDIR := tests
 
-.PHONY: all lib programs example tests check test lint clean
+.PHONY: all lib programs example tests check check-byte check-char test lint clean
 
 all: lib programs example tests
 
@@ -66,8 +66,18 @@ tests: lib
 
 # Run fgltest's own tests. Needs NO GGC engine, NO scenario server and NO
 # application, so it runs anywhere the compiler does — this is the target CI
-# should gate on.
-check: tests
+# should gate on. They run twice, under each FGL_LENGTH_SEMANTICS: BYTE is
+# Genero's default and CHAR a common setting, and string code that is right
+# under one can split multibyte text under the other. (A UTF-8 locale is
+# assumed, as for Genero itself.)
+check: check-byte check-char
+
+check-byte: export FGL_LENGTH_SEMANTICS = BYTE
+check-byte: tests
+	$(FGLRUN) $(TESTDIR)/selftest
+
+check-char: export FGL_LENGTH_SEMANTICS = CHAR
+check-char: tests
 	$(FGLRUN) $(TESTDIR)/selftest
 
 # Run the bundled example suites end to end. Unlike `check`, this needs the GGC

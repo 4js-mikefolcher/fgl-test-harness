@@ -18,6 +18,7 @@ IMPORT FGL com.fourjs.fgltest.expect
 IMPORT FGL com.fourjs.fgltest.script
 IMPORT FGL com.fourjs.fgltest.reporters
 IMPORT FGL com.fourjs.fgltest.cli
+IMPORT FGL com.fourjs.fgltest.ggcdriver
 IMPORT FGL com.fourjs.fgltest.server
 IMPORT FGL ggc
 IMPORT FGL fakedriver
@@ -94,6 +95,12 @@ MAIN
     CALL t_cli_cleanup()
     CALL group("cli: config mistakes are reported before anything runs")
     CALL t_cli_checkconfig()
+    CALL group("cli: environment variables in config values")
+    CALL t_cli_env()
+    CALL group("cli: value types and report-name clashes")
+    CALL t_cli_types_and_clashes()
+    CALL group("ggcdriver: which statuses end the session")
+    CALL t_ggc_session()
     CALL group("cli: isolate mode enumerates each test name once")
     CALL t_cli_unique()
     CALL group("core: shell arguments are quoted for the platform")
@@ -587,6 +594,31 @@ FUNCTION t_script_validation()
     LET err = script.load(p)
     CALL check("a repeated test name is rejected", contains(err, "test #2 reuses the name 'same' of test #1"))
 
+    # Keys the parser would drop, and values it would truncate or nullify.
+    CALL writeTmp(p,
+        '{"application":"app","$comment":"ok","_note":"ok","tests":[{"name":"t","skipp":true,"steps":['
+        || '{"command":"selectRow","target":"t","row":1.5},'
+        || '{"command":"selectRow","target":"t","row":"3"},'
+        || '{"command":"selectRow","target":"t","Row":2},'
+        || '{"command":"clear","row":0}]}]}')
+    LET err = script.load(p)
+    CALL check("an unknown test key is rejected", contains(err, "test 't': unknown key \"skipp\""))
+    CALL check("a fractional row is rejected", contains(err, "test 't' step 1: \"row\" must be a whole number, not 1.5"))
+    CALL check("a row given as a string is rejected", contains(err, "step 2: \"row\" must be a whole number, not the string \"3\""))
+    CALL check("a json_name key must be spelled exactly", contains(err, "step 3: unknown key \"Row\""))
+    CALL check("a row below 1 is rejected on any command", contains(err, "step 4: \"row\" must be 1 or more"))
+    CALL check("$ and _ keys are allowed", NOT contains(err, "comment") AND NOT contains(err, "_note"))
+
+    # The parser matches plain member names without regard to case, so must the checks.
+    CALL writeTmp(p,
+        '{"Application":"app","Tests":[{"Name":"t","Steps":['
+        || '{"Command":"assertRowCount","Target":"p","Value":5}]}]}')
+    LET err = script.load(p)
+    CALL check("keys in another case, and a numeric value, load", err IS NULL)
+    IF err IS NOT NULL THEN
+        DISPLAY "# ", err
+    END IF
+
     CALL checkEq("requirements() describes a command", script.requirements("assertCellAtRow"), "tcrv")
     CALL checkEq("a command needing nothing says so", script.requirements("clear"), "-")
     CALL check("an unknown command has no requirements", script.requirements("nosuch") IS NULL)
@@ -724,6 +756,7 @@ END FUNCTION
 
 FUNCTION t_junit()
     DEFINE x STRING
+    DEFINE o core.OutcomeList
     LET x = reporters.toJUnit(sampleOutcomes(), "suite<&>")
 
     CALL check("declares the XML prolog", contains(x, '<?xml version="1.0" encoding="UTF-8"?>'))
@@ -749,6 +782,10 @@ FUNCTION t_junit()
     CALL check("escapes < in a message", contains(x, "&lt;a&gt;"))
     CALL check("escapes quotes in a message", contains(x, "&quot;b&quot;"))
     CALL check("leaves no raw ampersand", NOT contains(x, "<&>"))
+    LET o = sampleOutcomes()
+    LET o[2].messages[1] = "esc" || (ASCII 27) || " ff" || (ASCII 12) || " café"
+    LET x = reporters.toJUnit(o, "s")
+    CALL check("JUnit drops control characters XML forbids", contains(x, "esc ff café"))
 END FUNCTION
 
 FUNCTION t_tap()
@@ -773,6 +810,11 @@ FUNCTION t_tap()
     LET o[1].name = "pays #1 invoice"
     LET x = reporters.toTAP(o)
     CALL check("escapes # in a test name so it is not a directive", contains(x, "ok 1 - pays \\#1 invoice"))
+    LET o[2].messages[1] = "café — naïve ü 日本"
+    LET o[2].messages[2] = "bell" || (ASCII 7) || " del" || (ASCII 127) || " end"
+    LET x = reporters.toTAP(o)
+    CALL check("non-ASCII text in a message is kept intact", contains(x, '"café — naïve ü 日本"'))
+    CALL check("control characters and DEL are dropped", contains(x, '"bell del end"'))
 END FUNCTION
 
 FUNCTION t_json()
@@ -811,7 +853,7 @@ FUNCTION t_cli_config()
 
     CALL util.JSON.parse('{"port":0,"suites":[]}', c2)
     LET err = cli.normalize(c2, "fgltest.json", "/opt/pkg/")
-    CALL checkInt("port 0 defaults to 6500", c2.port, 6500)
+    CALL check("port 0 is rejected, not silently replaced", contains(err, '"port" must be a port number'))
 
     CALL util.JSON.parse('{"port":7000,"suites":[]}', c3)
     LET err = cli.normalize(c3, "fgltest.json", "/opt/pkg/")
@@ -983,7 +1025,7 @@ FUNCTION t_cli_cleanup()
     CALL touch(dir, "s-json.1.json")
     CALL touch(dir, "fgltest.json")
 
-    CALL cli.clearRunFiles(dir, "s")
+    CALL check("clearing stale reports succeeds", cli.clearRunFiles(dir, "s") IS NULL)
     CALL check("a stale report is removed before a run", NOT there(dir, "s.json"))
     CALL check("a stale JUnit report is removed", NOT there(dir, "s.junit.xml"))
     CALL check("a stale TAP report is removed", NOT there(dir, "s.tap"))
@@ -991,7 +1033,7 @@ FUNCTION t_cli_cleanup()
     CALL check("other suites' files are left alone", there(dir, "s-json.1.json"))
     CALL check("the config is left alone", there(dir, "fgltest.json"))
 
-    CALL cli.clearIsolatedFiles(dir, "s")
+    CALL check("clearing old per-test reports succeeds", cli.clearIsolatedFiles(dir, "s") IS NULL)
     CALL check("old per-test reports are removed", NOT there(dir, "s.1.json"))
     CALL check("old per-test reports of any number are removed", NOT there(dir, "s.12.junit.xml"))
     CALL check("old per-test markers are removed", NOT there(dir, "s.3.done"))
@@ -1000,6 +1042,13 @@ FUNCTION t_cli_cleanup()
     CALL check("a suite sharing a prefix is left alone", there(dir, "s-json.1.json"))
     CALL check("cleanup never touches the config", there(dir, "fgltest.json"))
     CALL check("isIsolatedFile rejects the suite's own report", NOT cli.isIsolatedFile("s.json", "s"))
+
+    # A stale report that cannot be removed would be read back as new results.
+    LET ok = os.Path.mkDir(os.Path.join(dir, "stuck.json"))
+    CALL touch(dir, "stuck.json/keep")
+    CALL check("a report that cannot be removed is reported",
+        contains(cli.clearRunFiles(dir, "stuck"), "cannot remove"))
+    LET ok = os.Path.delete(os.Path.join(dir, "stuck.json/keep"))
 
     CALL removeDir(dir)
 END FUNCTION
@@ -1040,7 +1089,7 @@ END FUNCTION
 # Run tests/runnersuite in `mode` with its reports in `dir`; return the RUN
 # status and the parsed JSON report (rep.tests NULL if none was written).
 FUNCTION runSuite(mode STRING, dir STRING) RETURNS (INTEGER, SuiteReport)
-    DEFINE prog, txt STRING
+    DEFINE prog, txt, err STRING
     DEFINE st INTEGER
     DEFINE rep SuiteReport
 
@@ -1050,7 +1099,7 @@ FUNCTION runSuite(mode STRING, dir STRING) RETURNS (INTEGER, SuiteReport)
     CALL fgl_setenv("FGLTEST_NAME", "crash")
     CALL fgl_setenv("FGLTEST_ONLY", fgl_getenv("SELFTEST_ONLY"))
     CALL fgl_setenv("FGLTEST_TIMEOUT", "")
-    CALL cli.clearRunFiles(dir, "crash")
+    LET err = cli.clearRunFiles(dir, "crash")
     RUN SFMT('fglrun "%1" %2 > "%3" 2>&1', prog, mode,
         os.Path.join(dir, mode || ".log")) RETURNING st
     CALL fgl_setenv("FGLTEST_REPORTERS", "")
@@ -1492,6 +1541,14 @@ FUNCTION t_core_quote()
     CALL checkEq("windows: backslashes before a quote are doubled",
         core.quoteArg('a\\"b', TRUE), '"a\\\\\\"b"')
     CALL checkEq("an empty value is an empty argument", core.quoteArg(NULL, FALSE), '""')
+    -- Non-ASCII text must pass through whole under BYTE semantics too.
+    CALL checkEq("sh: a non-ASCII path is kept intact",
+        core.quoteArg("/Users/josé/données", FALSE), '"/Users/josé/données"')
+    CALL checkEq("windows: a non-ASCII path is kept intact",
+        core.quoteArg('C:\\josé\\données\\', TRUE), '"C:\\josé\\données\\\\"')
+    CALL checkEq("windows: a quote at the end is escaped", core.quoteArg('a"', TRUE), '"a\\""')
+    -- $NAME is expanded by fgltest itself, so the shell must see it literally.
+    CALL checkEq("sh: $ and backticks are literal", core.quoteArg("$HOME/`x`", FALSE), '"\\$HOME/\\`x\\`"')
 END FUNCTION
 
 # ------------------------------------------------- runner: duplicates ----
@@ -1544,4 +1601,100 @@ FUNCTION t_version()
     CALL checkEq("core.VERSION matches fglpkg.json", core.VERSION, v)
     CALL check("CHANGELOG.md has a section for this version",
         contains(changelog, SFMT("## [%1] - ", core.VERSION)))
+END FUNCTION
+
+# --------------------------------------------------- cli: env and config ----
+
+FUNCTION t_cli_env()
+    DEFINE v, unset, err STRING
+    DEFINE c cli.Config
+
+    CALL fgl_setenv("SELFTEST_DIR", "/opt/app")
+    CALL fgl_setenv("SELFTEST_EMPTY", "")
+    CALL cli.expandEnv("$SELFTEST_DIR/x") RETURNING v, unset
+    CALL checkEq("$NAME is expanded", v, "/opt/app/x")
+    CALL cli.expandEnv("${SELFTEST_DIR}y") RETURNING v, unset
+    CALL checkEq("${NAME} is expanded", v, "/opt/appy")
+    CALL cli.expandEnv("costs $$5, or $5 — a$") RETURNING v, unset
+    CALL checkEq("$$ is a $, and a $ before no name is kept", v, "costs $5, or $5 — a$")
+    CALL cli.expandEnv("données/$SELFTEST_DIR") RETURNING v, unset
+    CALL checkEq("non-ASCII text around a variable is kept", v, "données//opt/app")
+    CALL cli.expandEnv("$SELFTEST_NOPE/x") RETURNING v, unset
+    CALL checkEq("an unset variable is named", unset, "SELFTEST_NOPE")
+    CALL cli.expandEnv("$SELFTEST_EMPTY/x") RETURNING v, unset
+    CALL checkEq("an empty variable counts as unset", unset, "SELFTEST_EMPTY")
+
+    CALL util.JSON.parse('{"suites":[{"name":"a","module":"$SELFTEST_DIR/a_test",'
+        || '"commandLine":"fglrun $SELFTEST_DIR/app"}]}', c)
+    LET err = cli.normalize(c, os.Path.join("conf", "fgltest.json"), "/opt/pkg/")
+    CALL checkEq("a variable in a module path is expanded before resolving",
+        c.suites[1].module, "/opt/app/a_test")
+    CALL checkEq("a variable in the command line is expanded",
+        c.suites[1].commandLine, "fglrun /opt/app/app")
+    CALL util.JSON.parse('{"suites":[{"name":"a","module":"$SELFTEST_NOPE/a_test"}]}', c)
+    LET err = cli.normalize(c, "fgltest.json", "/opt/pkg/")
+    CALL check("an unset variable in the config is reported",
+        contains(err, "suite #1 module uses the environment variable SELFTEST_NOPE, which is not set"))
+    CALL fgl_setenv("SELFTEST_DIR", "")
+END FUNCTION
+
+FUNCTION t_cli_types_and_clashes()
+    DEFINE dir, cfgPath, text, err STRING
+    DEFINE ok INTEGER
+    DEFINE c1, c2, c3, c4 cli.Config
+
+    LET dir = os.Path.makeTempName()
+    LET ok = os.Path.mkDir(dir)
+    CALL touch(dir, "a_test.42m")
+    LET cfgPath = os.Path.join(dir, "fgltest.json")
+
+    # Keys in another case reach the record (the parser ignores case), so they
+    # must not be called unknown.
+    LET text = '{"suites":[{"Name":"a","module":"a_test","workDir":".","commandline":"fglrun a"}]}'
+    CALL writeTmp(cfgPath, text)
+    CALL util.JSON.parse(text, c1)
+    LET err = cli.normalize(c1, cfgPath, "/opt/pkg/")
+    LET err = cli.checkConfig(cfgPath, text, c1)
+    CALL check("keys in another case are accepted", err IS NULL)
+    IF err IS NOT NULL THEN
+        DISPLAY "# ", err
+    END IF
+
+    # Values of the wrong type would parse to NULL (or be truncated) silently.
+    LET text = '{"timeout":"30s","isolate":"yes","suites":[{"name":"a","module":"a_test","timeout":1.5}]}'
+    CALL writeTmp(cfgPath, text)
+    CALL util.JSON.parse(text, c2)
+    LET err = cli.normalize(c2, cfgPath, "/opt/pkg/")
+    LET err = cli.checkConfig(cfgPath, text, c2)
+    CALL check("a string timeout is rejected", contains(err, 'the config: "timeout" must be a whole number, not the string "30s"'))
+    CALL check("a non-boolean isolate is rejected", contains(err, '"isolate" must be true or false'))
+    CALL check("a fractional suite timeout is rejected", contains(err, 'suite #1: "timeout" must be a whole number, not 1.5'))
+
+    # A suite whose report would be the config file must not run: the CLI
+    # deletes stale reports first, so the config would be gone.
+    LET text = '{"suites":[{"name":"fgltest","module":"a_test"},{"name":"ggcserver","module":"a_test"}]}'
+    CALL writeTmp(cfgPath, text)
+    CALL util.JSON.parse(text, c3)
+    LET err = cli.normalize(c3, cfgPath, "/opt/pkg/")
+    LET err = cli.checkConfig(cfgPath, text, c3)
+    CALL check("a suite whose report would replace the config is rejected",
+        contains(err, "suite 'fgltest': its report") AND contains(err, "would replace the config file"))
+    CALL check("a reserved suite name is rejected", contains(err, "the name 'ggcserver' is reserved"))
+
+    LET text = '{"port":-1,"suites":[{"name":"a","module":"a_test"}]}'
+    CALL util.JSON.parse(text, c4)
+    LET err = cli.normalize(c4, cfgPath, "/opt/pkg/")
+    CALL check("a negative port is rejected", contains(err, '"port" must be a port number'))
+
+    CALL removeDir(dir)
+END FUNCTION
+
+FUNCTION t_ggc_session()
+    CALL check("CLOSED ends the session", ggcdriver.sessionOver(17, ""))
+    CALL check("an ended scenario ends the session",
+        ggcdriver.sessionOver(12, "The scenario has already ended."))
+    CALL check("a busy DVM does not end the session",
+        NOT ggcdriver.sessionOver(12, "The DVM is not in interactive state but VM processing"))
+    CALL check("a bad field name does not end the session",
+        NOT ggcdriver.sessionOver(7, "FormField not found"))
 END FUNCTION

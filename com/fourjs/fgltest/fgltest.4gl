@@ -85,7 +85,7 @@ MAIN
         DISPLAY SFMT("fgltest: %1", err)
         EXIT PROGRAM 2
     END IF
-    CALL discoverSuites(cfg)   -- append any auto-discovered suites
+    CALL discoverSuites(cfg, cfgPath)   -- append any auto-discovered suites
 
     LET ok = os.Path.mkDir(cfg.outdir)   -- ignore result: may already exist
     CALL fgl_setenv("FGLTEST_OUTDIR", cfg.outdir)   -- so the server log lands here too
@@ -99,6 +99,16 @@ MAIN
 
     IF cfg.suites.getLength() == 0 THEN
         DISPLAY "fgltest: no suites to run"
+        EXIT PROGRAM 2
+    END IF
+
+    # Every suite's reports from the last run go first — whole-suite and
+    # per-test ones alike, whichever mode ran last — so none can be read back,
+    # or picked up by a CI glob, as this run's. One that cannot be removed
+    # stops the run: it would be taken for a result.
+    LET err = clearPreviousRun(cfg)
+    IF err IS NOT NULL THEN
+        DISPLAY SFMT("fgltest: %1 — it would be read back as this run's result", err)
         EXIT PROGRAM 2
     END IF
 
@@ -190,9 +200,6 @@ FUNCTION runIsolated(cfg cli.Config, idx INTEGER, agg cli.Summary INOUT)
         RETURN
     END IF
 
-    # Per-test reports from an earlier run (possibly with more tests) would
-    # otherwise sit beside this run's and be picked up by a CI glob.
-    CALL cli.clearIsolatedFiles(cfg.outdir, s.name)
     FOR k = 1 TO names.getLength()
         LET rname = SFMT("%1.%2", s.name, k)
         CALL runSuiteProc(cfg, s, names[k], rname) RETURNING st, timedOut, completed
@@ -255,7 +262,7 @@ END FUNCTION
 # whether the runner reached the end of the suite (its completion marker).
 FUNCTION runSuiteProc(cfg cli.Config, s cli.SuiteCfg, only STRING, rname STRING)
     RETURNS (INTEGER, BOOLEAN, BOOLEAN)
-    DEFINE cmd, logf, donef STRING
+    DEFINE cmd, logf, donef, err STRING
     DEFINE st INTEGER
     DEFINE tmo, w INTEGER
 
@@ -264,8 +271,14 @@ FUNCTION runSuiteProc(cfg cli.Config, s cli.SuiteCfg, only STRING, rname STRING)
     LET tmo = suiteTimeout(cfg, s)
     # The reports and marker are read back after the child exits: remove any
     # left by an earlier run first, or a suite that never started would be
-    # credited with that run's results.
-    CALL cli.clearRunFiles(cfg.outdir, rname)
+    # credited with that run's results. (clearPreviousRun() did this already;
+    # this covers a file that appeared since.) If one survives, the suite is
+    # not run, and counts as incomplete.
+    LET err = cli.clearRunFiles(cfg.outdir, rname)
+    IF err IS NOT NULL THEN
+        DISPLAY SFMT("  ! %1 — not run, as it would be read back as this run's result", err)
+        RETURN -1, FALSE, FALSE
+    END IF
 
     CALL fgl_setenv("FGLTEST_REPORTERS", SFMT("%1,json", cfg.reporters))
     CALL fgl_setenv("FGLTEST_OUTDIR", cfg.outdir)
@@ -323,6 +336,24 @@ FUNCTION runSuiteProc(cfg cli.Config, s cli.SuiteCfg, only STRING, rname STRING)
         DISPLAY "  ! could not restart the scenario server; later suites will fail"
     END IF
     RETURN -1, TRUE, FALSE
+END FUNCTION
+
+# Remove what the last run left for every suite: its whole-suite reports and
+# marker, and its per-test (isolated) ones. Returns the first file that could
+# not be removed, or NULL.
+FUNCTION clearPreviousRun(cfg cli.Config) RETURNS STRING
+    DEFINE i INTEGER
+    DEFINE err STRING
+    FOR i = 1 TO cfg.suites.getLength()
+        LET err = cli.clearRunFiles(cfg.outdir, cfg.suites[i].name)
+        IF err IS NULL THEN
+            LET err = cli.clearIsolatedFiles(cfg.outdir, cfg.suites[i].name)
+        END IF
+        IF err IS NOT NULL THEN
+            RETURN err
+        END IF
+    END FOR
+    RETURN NULL
 END FUNCTION
 
 # Effective wall-clock limit for a suite: its own, else the global, else none.
@@ -415,7 +446,10 @@ FUNCTION listModuleTests(cfg cli.Config, s cli.SuiteCfg) RETURNS cli.NameList
     LET listFile = SFMT("%1/%2.tests", cfg.outdir, s.name)
     # A list left by an earlier run would be read as this module's tests if the
     # module now fails to start.
-    CALL cli.deleteQuietly(listFile)
+    IF cli.removeFile(listFile) IS NOT NULL THEN
+        DISPLAY SFMT("  ! cannot remove the stale test list '%1'", listFile)
+        RETURN names
+    END IF
     CALL fgl_setenv("FGLTEST_ONLY", "")
     CALL fgl_setenv("FGLTEST_ACTIONS", "")
     CALL fgl_setenv("FGLTEST_TIMEOUT", "")
@@ -445,10 +479,10 @@ END FUNCTION
 # Scan cfg.discover.dir and append discovered suites to cfg.suites. Runs after
 # cli.normalize(), so dir and workdir are already resolved and the paths built
 # here need no further resolution.
-FUNCTION discoverSuites(cfg cli.Config INOUT)
+FUNCTION discoverSuites(cfg cli.Config INOUT, cfgPath STRING)
     DEFINE d cli.DiscoverCfg
     DEFINE h, n INTEGER
-    DEFINE entry, modFull STRING
+    DEFINE entry, modFull, clash STRING
     DEFINE s cli.SuiteCfg
 
     LET d = cfg.discover
@@ -491,6 +525,11 @@ FUNCTION discoverSuites(cfg cli.Config INOUT)
         IF hasSuite(cfg, s.name) THEN
             DISPLAY SFMT("fgltest: discover: skipped '%1' — a suite with that name is already configured",
                 entry)
+            CONTINUE WHILE
+        END IF
+        LET clash = cli.outputClash(cfg, cfgPath, s.name)
+        IF clash IS NOT NULL THEN
+            DISPLAY SFMT("fgltest: discover: skipped '%1' — %2", entry, clash)
             CONTINUE WHILE
         END IF
         CALL applyTemplate(s, d)
