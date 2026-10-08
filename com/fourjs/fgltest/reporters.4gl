@@ -99,10 +99,16 @@ END FUNCTION
 # ----------------------------------------------------------------- TAP ----
 
 #+ Test Anything Protocol v13.
+#+
+#+ A test that did not pass carries a YAML diagnostic block: `severity` (fail or
+#+ error), `message` (the first message, for consumers that read only that)
+#+ and `messages` (all of them). Every value is a double-quoted YAML string, so
+#+ a message holding `:`, `#` or quotes cannot break the block; a `#` or `\` in a
+#+ test name is escaped, as TAP requires, so it is not read as a directive.
 PUBLIC FUNCTION toTAP(outcomes core.OutcomeList) RETURNS STRING
     DEFINE b base.StringBuffer
     DEFINE i, k INTEGER
-    DEFINE nl STRING
+    DEFINE nl, name STRING
 
     LET nl = ASCII 10
     LET b = base.StringBuffer.create()
@@ -112,16 +118,17 @@ PUBLIC FUNCTION toTAP(outcomes core.OutcomeList) RETURNS STRING
     CALL b.append(nl)
 
     FOR i = 1 TO outcomes.getLength()
+        LET name = tapDescription(outcomes[i].name)
         IF core.isTrue(outcomes[i].skipped) THEN
-            CALL b.append(SFMT("ok %1 - %2 # SKIP", i, outcomes[i].name))
+            CALL b.append(SFMT("ok %1 - %2 # SKIP", i, name))
         ELSE
             IF core.isTrue(outcomes[i].passed) THEN
-                CALL b.append(SFMT("ok %1 - %2", i, outcomes[i].name))
+                CALL b.append(SFMT("ok %1 - %2", i, name))
             ELSE
                 IF core.isTrue(outcomes[i].errored) THEN
-                    CALL b.append(SFMT("not ok %1 - %2 # ERROR", i, outcomes[i].name))
+                    CALL b.append(SFMT("not ok %1 - %2 # ERROR", i, name))
                 ELSE
-                    CALL b.append(SFMT("not ok %1 - %2", i, outcomes[i].name))
+                    CALL b.append(SFMT("not ok %1 - %2", i, name))
                 END IF
             END IF
         END IF
@@ -129,10 +136,24 @@ PUBLIC FUNCTION toTAP(outcomes core.OutcomeList) RETURNS STRING
         IF NOT core.isTrue(outcomes[i].passed) AND NOT core.isTrue(outcomes[i].skipped) THEN
             CALL b.append("  ---")
             CALL b.append(nl)
-            FOR k = 1 TO outcomes[i].messages.getLength()
-                CALL b.append(SFMT("  message: %1", outcomes[i].messages[k]))
+            IF core.isTrue(outcomes[i].errored) THEN
+                CALL b.append("  severity: error")
+            ELSE
+                CALL b.append("  severity: fail")
+            END IF
+            CALL b.append(nl)
+            IF outcomes[i].messages.getLength() > 0 THEN
+                CALL b.append("  message: ")
+                CALL b.append(yamlString(outcomes[i].messages[1]))
                 CALL b.append(nl)
-            END FOR
+                CALL b.append("  messages:")
+                CALL b.append(nl)
+                FOR k = 1 TO outcomes[i].messages.getLength()
+                    CALL b.append("    - ")
+                    CALL b.append(yamlString(outcomes[i].messages[k]))
+                    CALL b.append(nl)
+                END FOR
+            END IF
             CALL b.append("  ...")
             CALL b.append(nl)
         END IF
@@ -153,7 +174,9 @@ PRIVATE TYPE JsonReport RECORD
     cases core.OutcomeList
 END RECORD
 
-#+ Structured JSON report.
+#+ Structured JSON report: the suite name, the counts — tests, passed, failed
+#+ (a check did not hold), errors (could not run), skipped; disjoint, so they
+#+ add up to tests — the total duration, and the per-test cases.
 PUBLIC FUNCTION toJSON(outcomes core.OutcomeList, suiteName STRING) RETURNS STRING
     DEFINE rep JsonReport
     DEFINE i INTEGER
@@ -165,12 +188,15 @@ PUBLIC FUNCTION toJSON(outcomes core.OutcomeList, suiteName STRING) RETURNS STRI
         IF core.isTrue(outcomes[i].skipped) THEN
             LET rep.skipped = rep.skipped + 1
         ELSE
+            # passed, failed and errors are disjoint, like JUnit's counts:
+            # failed = a check did not hold, errors = could not run.
             IF core.isTrue(outcomes[i].passed) THEN
                 LET rep.passed = rep.passed + 1
             ELSE
-                LET rep.failed = rep.failed + 1
                 IF core.isTrue(outcomes[i].errored) THEN
                     LET rep.errors = rep.errors + 1
+                ELSE
+                    LET rep.failed = rep.failed + 1
                 END IF
             END IF
         END IF
@@ -232,11 +258,78 @@ PRIVATE FUNCTION isoNow() RETURNS STRING
     RETURN SFMT("%1T%2", s.subString(1, 10), s.subString(12, 19))
 END FUNCTION
 
-#+ Escape a string for XML text/attribute content.
+# A TAP test description: on one line, with "\" and "#" escaped so the name
+# cannot be read as a directive.
+PRIVATE FUNCTION tapDescription(s STRING) RETURNS STRING
+    DEFINE b base.StringBuffer
+    LET b = base.StringBuffer.create()
+    CALL b.append(s)
+    CALL b.replace("\\", "\\\\", 0)
+    CALL b.replace("#", "\\#", 0)
+    CALL b.replace(ASCII 13, " ", 0)
+    CALL b.replace(ASCII 10, " ", 0)
+    RETURN b.toString()
+END FUNCTION
+
+# A double-quoted YAML scalar: backslash, quote and line breaks escaped, other
+# control characters dropped — C0, DEL and C1 (U+0080..U+009F but U+0085),
+# none of which YAML allows in a scalar. Built with
+# StringBuffer.replace(), which leaves multibyte text intact under either
+# FGL_LENGTH_SEMANTICS; a getCharAt() walk would split it under BYTE.
+PRIVATE FUNCTION yamlString(s STRING) RETURNS STRING
+    DEFINE e, r base.StringBuffer
+
+    LET e = base.StringBuffer.create()
+    CALL e.append(s)
+    CALL e.replace("\\", "\\\\", 0)   -- first, so later escapes stay single
+    CALL e.replace('"', '\\"', 0)
+    CALL e.replace(ASCII 10, "\\n", 0)
+    CALL e.replace(ASCII 13, "\\r", 0)
+    CALL e.replace(ASCII 9, "\\t", 0)
+    CALL dropControls(e)
+    CALL dropC1(e)
+    LET r = base.StringBuffer.create()
+    CALL r.append('"')
+    CALL r.append(e.toString())
+    CALL r.append('"')
+    RETURN r.toString()
+END FUNCTION
+
+# Remove the C1 control characters U+0080..U+009F except U+0085 (NEL), which
+# YAML forbids; cp1252 text read as Latin-1 turns smart quotes into them. Each
+# is built from its UTF-8 bytes with urlDecode(), so the search string has the
+# same form as the text under either FGL_LENGTH_SEMANTICS. (XML allows them.)
+PRIVATE FUNCTION dropC1(e base.StringBuffer)
+    DEFINE k INTEGER
+    DEFINE hex STRING
+    FOR k = 128 TO 159
+        IF k != 133 THEN
+            LET hex = util.Integer.toHexString(k)
+            CALL e.replace(util.Strings.urlDecode("%C2%" || hex), "", 0)
+        END IF
+    END FOR
+END FUNCTION
+
+# Remove the C0 control characters other than TAB, LF and CR, and DEL: none of
+# them may appear in a YAML scalar or an XML 1.0 document.
+PRIVATE FUNCTION dropControls(e base.StringBuffer)
+    DEFINE k INTEGER
+    FOR k = 1 TO 31
+        IF k != 9 AND k != 10 AND k != 13 THEN
+            CALL e.replace(ASCII k, "", 0)
+        END IF
+    END FOR
+    CALL e.replace(ASCII 127, "", 0)
+END FUNCTION
+
+#+ Escape a string for XML text/attribute content. Control characters XML 1.0
+#+ does not allow (an ESC or form feed in an application message, say) are
+#+ dropped: one would make the whole report unparseable.
 PRIVATE FUNCTION xmlEsc(s STRING) RETURNS STRING
     DEFINE b base.StringBuffer
     LET b = base.StringBuffer.create()
     CALL b.append(s)
+    CALL dropControls(b)
     CALL b.replace("&", "&amp;", 0)
     CALL b.replace("<", "&lt;", 0)
     CALL b.replace(">", "&gt;", 0)

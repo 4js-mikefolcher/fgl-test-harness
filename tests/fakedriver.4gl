@@ -21,6 +21,9 @@ PRIVATE DEFINE m_instance FakeDriver
 
 # --- scripted state -------------------------------------------------------
 PRIVATE DEFINE m_aui STRING
+# The current-window tree auiPart() returns (NULL = the whole tree), and the
+# selector it was last asked for.
+PRIVATE DEFINE m_auiPart, m_lastSelector STRING
 PRIVATE DEFINE m_formName, m_formTitle, m_windowName, m_windowTitle STRING
 PRIVATE DEFINE m_fieldValues DICTIONARY OF STRING
 PRIVATE DEFINE m_current STRING
@@ -33,6 +36,8 @@ PRIVATE DEFINE m_log DYNAMIC ARRAY OF STRING
 #+ Reset every scripted value and the interaction log.
 PUBLIC FUNCTION reset()
     LET m_aui = NULL
+    LET m_auiPart = NULL
+    LET m_lastSelector = NULL
     LET m_formName = NULL
     LET m_formTitle = NULL
     LET m_windowName = NULL
@@ -58,6 +63,17 @@ END FUNCTION
 
 PUBLIC FUNCTION setAui(xmlText STRING)
     LET m_aui = xmlText
+END FUNCTION
+
+#+ Script what auiPart() returns (the current window), separately from the
+#+ whole tree. Unset, auiPart() returns the whole tree.
+PUBLIC FUNCTION setAuiPart(xmlText STRING)
+    LET m_auiPart = xmlText
+END FUNCTION
+
+#+ The selector auiPart() was last called with.
+PUBLIC FUNCTION lastSelector() RETURNS STRING
+    RETURN m_lastSelector
 END FUNCTION
 
 PUBLIC FUNCTION setForm(name STRING, title STRING)
@@ -214,5 +230,12 @@ FUNCTION (self FakeDriver) auiTree() RETURNS xml.DomDocument
 END FUNCTION
 
 FUNCTION (self FakeDriver) auiPart(selector STRING) RETURNS xml.DomDocument
-    RETURN self.auiTree()
+    DEFINE doc xml.DomDocument
+    LET m_lastSelector = selector
+    IF m_auiPart IS NULL THEN
+        RETURN self.auiTree()
+    END IF
+    LET doc = xml.DomDocument.Create()
+    CALL doc.loadFromString(m_auiPart)
+    RETURN doc
 END FUNCTION

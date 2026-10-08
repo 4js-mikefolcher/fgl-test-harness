@@ -36,7 +36,6 @@ results/
 # fglpkg build output
 *.zip
 .fglpkg/
-.fglpkgignore
 
 # Local AI Files
 .claude/

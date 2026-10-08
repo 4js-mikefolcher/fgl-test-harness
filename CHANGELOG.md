@@ -7,8 +7,210 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._ Planned work is tracked in the README "Roadmap" section
-(e.g. a jar-backed `Driver`).
+_Nothing yet._
+
+## [1.1.0] - 2026-10-08
+
+Hardening for distribution. A run can no longer pass when a suite crashed, was
+killed or never started; the installed package works out of the box; config
+and action-file mistakes are reported before anything runs; and every report
+format is consistent and parseable. A few behaviours change for existing
+users — config paths are relative to the config file, the JSON report's
+`failed` no longer includes errors, and fgltest expands `$NAME` in config
+values itself — see **Changed**.
+
+### Fixed
+
+- **A suite that dies part-way no longer passes.** The CLI judged a suite by its
+  JSON report alone. A runtime error in test code (or anything else that
+  stopped the process) left a report holding only the tests that had finished,
+  and the run went green. Now:
+  - the runner puts every selected test on the reports **before anything
+    runs** (as *not run*), marks the running test *did not complete* while it
+    runs, and rewrites the reports around each test. Whatever stops the
+    process, the reports name the test it died in and every test it never
+    reached;
+  - the CLI requires the runner's `<name>.done` completion marker from every
+    suite process (it was only consulted with a `timeout`). A process that
+    ends without it is counted as **incomplete** and fails the run, even if
+    every test that finished had passed;
+  - a watchdog **timeout** now fails the run too (it used to be reported but
+    leave the exit code at 0 when the partial results passed).
+- **Results from an earlier run can no longer stand in for this one.** Before
+  anything runs, the CLI deletes every suite's previous `<name>.json` /
+  `.junit.xml` / `.tap` / `.done` and every old per-test `<name>.<n>.*`,
+  whichever mode ran last; a file it cannot delete stops the run (exit 2). A
+  suite whose module was missing used to report the previous run's passes and
+  exit 0.
+- **JSON suites work from an installed package.** The default `jsonRunner` was
+  `com/fourjs/fgltest/fgltest_json` relative to the current directory, and
+  `fglrun` never looks a program path up on `FGLLDPATH`, so every `actions`
+  suite failed unless the CLI was started from the repository root. The
+  default is now the `fgltest_json` program beside the CLI itself.
+- **The `port` setting reaches the suites.** The CLI started the scenario
+  server on the configured port but never told the suites, which connected to
+  6500 regardless. Each suite now gets `--port`. An omitted `port` (which
+  parses as NULL, not 0) now also falls back to 6500.
+- Program paths in suite commands are quoted, so a path containing spaces
+  works.
+- **The action-file JSON Schema ships with the package**
+  (`schema/action-file.schema.json`); it was only in the source repository.
+- `.fglpkgignore` is committed. It was listed in `.gitignore`, so a fresh
+  clone packed without it.
+- **An application crash is charged to the test that caused it.** A Genero
+  program that stops on a runtime error shows it in a message box and waits,
+  and GGC keeps answering from the last screen — so the test that crashed the
+  application could *pass*, and the crash surfaced later as an unrelated
+  assertion failure. After every test and `beforeAll` / `afterAll` phase the
+  runner now looks for the runtime's error box (new
+  `inspect.applicationError()`); when it finds one it errors that test with the
+  runtime's own message (`Program stopped at 'x.4gl', line number N. …`) and
+  reports the remaining tests as not run.
+- **`beforeAll` / `afterAll` failures are reported.** Their checks and driver
+  errors used to be discarded, so a broken setup let every test run against it
+  and a failed teardown went unnoticed. A failing `beforeAll` now gets a
+  `beforeAll hook` entry and the tests are reported `not run: the beforeAll
+  hook failed`; `afterAll` still runs, and a failing one gets an `afterAll
+  hook` entry. Runtime errors in these hooks are trapped like a test's. Once
+  the application has ended, an `afterAll` hook's interactions with it are
+  expected to fail and are not counted.
+- **The CLI no longer stops a scenario server it did not start.** A server
+  already listening on the port — a developer's own, or another run's — is
+  reused and left running, and the timeout watchdog no longer restarts it.
+- **Action files are checked for table, number and key mistakes.** A table
+  command missing its `column` or `row`, a row below 1 or not a whole number
+  (`"row": 1.5` was row 1), a count or delay that is not a whole number
+  (`"value": "five"` silently became NULL), and an unknown key (`"skipp": true`
+  ran the test) used to load cleanly. They are now reported at load with the
+  other problems. Keys match without regard to case, as the JSON parser
+  matches them, except `column` / `row` (exact, like the parser), and values
+  the parser converts cleanly (`"row": "3"`, a count written `5.0`) are
+  accepted. The JSON Schema carries the same rules — test `steps` may not be
+  empty, values may be strings or numbers, `$`/`_` keys are allowed — and a
+  self-test keeps its per-command rules in step with the loader.
+- **A test name used twice no longer runs twice.** Isolate mode selected tests
+  by name, so two tests sharing one were each run (and counted) under both
+  processes. An action file with a repeated name is now rejected at load; in a
+  compiled suite the repeat is reported as an error and not run, and the CLI
+  enumerates each name once.
+- **The TAP diagnostic block is valid YAML.** It repeated a `message:` key per
+  message and left values unquoted, so a message with a `:` or `#` broke
+  strict consumers. It now has `severity`, `message` and a `messages` list, all
+  quoted, with control characters (C0, DEL and C1) dropped; a `#` in a test
+  name is escaped so it is not read as a directive.
+- **JUnit reports drop control characters XML forbids.** An ESC or form feed
+  in an application's message made the whole report unparseable.
+- **`fgltest.json` mistakes are reported instead of ignored.** A typo'd key was
+  dropped silently by the JSON parser (`"comandLine"`: the suite then ran with
+  no command line), and a value it could not convert became NULL
+  (`"timeout": "30s"`). The config is now checked before anything starts —
+  unknown keys (matched without regard to case, as the parser does), values
+  the parser cannot convert cleanly (numeric strings and 0/1 booleans are
+  still fine), suites
+  without or reusing a name (their reports overwrote each other), a suite whose
+  reports would overwrite the config or an action file (a suite named
+  `fgltest` used to replace `fgltest.json`; one called `fglpkg`, the project's
+  `fglpkg.json`), or any report-type file fgltest did not write (deleted
+  even with that reporter off), reserved names, both or neither of
+  `module` / `actions`, a missing module or action file, an unknown `mode` or
+  reporter, `ua` without a `url`, a negative `timeout` — with every problem
+  listed at once and exit code 2. A discovered suite whose name is taken, or
+  whose reports would clash, is skipped with a note.
+- **Values in suite commands are quoted properly.** The command line, working
+  directory, URL and paths were wrapped in `"…"` unescaped: a `commandLine`
+  with quotes of its own broke the suite command, and on Windows a `workdir`
+  ending in `\` swallowed the closing quote. They are now quoted for the
+  platform's shell (`core.shellArg`) and arrive exactly as written — quotes,
+  backslashes, `$`, backticks and non-ASCII text alike (on Windows, `cmd.exe`
+  still expands `%NAME%` inside quotes). Note that GGC itself
+  splits the command line at spaces without honouring quotes, so an
+  application argument still cannot contain a space.
+- **`inspect.fields()` and `inspect.tables()` read the current window only.**
+  They searched the whole AUI tree, which keeps every open window, so inside a
+  modal child window they also returned the parent's fields and tables
+  (`assertFieldCount`, `assertFieldMissing`, `assertFieldExists`, …, were
+  affected the same way).
+
+### Changed
+
+- **Relative paths in `fgltest.json` resolve against the config file's
+  directory**, not the current one: `outdir`, `jsonRunner`, each suite's
+  `module` / `actions` / `workdir`, and `discover.dir` / `discover.workdir`.
+  `outdir` defaults to the config's directory. A config at the project root
+  run from the project root behaves exactly as before; this is what lets
+  `fglpkg bdl 4js-fgltest fgltest "$PWD/fgltest.json"` work, since fglpkg
+  starts programs inside the installed package.
+- **Runtime errors in tests can be trapped per test.** A test or
+  `beforeEach`/`afterEach` hook whose module declares `WHENEVER ANY ERROR RAISE`
+  now errors just that test (`runtime error -8083: …`), still runs its
+  `afterEach`, and lets the suite carry on. Without the opt-in BDL stops the
+  program, which the write-ahead reports above account for.
+- A skipped test stays *skipped* when a run is cut short (it used to be
+  re-reported as errored-not-run).
+- **The JSON report's `failed` no longer includes errored tests.** `passed`,
+  `failed`, `errors` and `skipped` are now disjoint and add up to `tests`, as in
+  JUnit and in `fgltest.summary.json` (which already counted this way). Anyone
+  reading `<name>.json` and subtracting `errors` from `failed` should stop.
+- A `tcp` suite without a `workdir` runs its application in the config's
+  directory, and an empty `commandLine` is left out so GGC applies its default
+  (`fglrun <application>`).
+- `"reporters"` tolerates spaces (`"console, junit"`).
+- The manifest's Genero range is `^6.0.0` (was `>=6.0.0`): the shipped `.42m`
+  files are built for Genero 6, so a future 7.x is not claimed.
+- **The application ending stops the run at once.** GGC's
+  `GGC-12 The scenario has already ended` is now treated like a closed
+  session: the test that hit it errors and the remaining tests are reported
+  `not run: the application under test ended`, instead of each one erroring on
+  its first interaction. (Other `ILLEGAL_STATE` reports, such as a DVM still
+  processing, only error the test that hit them.)
+- **`$NAME` and `${NAME}` in config values are expanded by fgltest**, in paths,
+  command lines and URLs, the same way on every platform (`$$` for a literal
+  `$`; `cmd.exe` on Windows still expands `%NAME%` as well), and an unset
+  variable is a config error. Before, the POSIX shell
+  expanded `$VAR` in a `commandLine` (an unset one became empty), not at all on
+  Windows, and not in a `module` or `workdir` once they were quoted.
+- A `port` of 0 or below is an error; only an absent `port` defaults to 6500.
+- **Stricter validation rejects some files that ran before.** In
+  `fgltest.json` and in action files, a key fgltest does not know is an error —
+  including harmless extras such as `"description"`; name a comment key with a
+  leading `_` (`"_description"`), which is allowed. An action-file step with a
+  `"row"` below 1 is an error even on a command that takes no row. These ran
+  on 1.0.0 (the extra key was ignored) though the 1.0.0 schema already flagged
+  them; values the JSON parser converts cleanly — `"port": "6752"`,
+  `"isolate": 1`, `"row": "3"`, `"name": 5` — are still accepted.
+- The failure note forwarded to GGC for an errored test gives its cause
+  instead of `0/0 checks failed`.
+
+### Added
+
+- `runner.runWith(driver)` — run the registered tests against any `Driver`
+  with no GGC session.
+- `inspect.applicationError()` — the runtime error the application under test
+  stopped with, or NULL.
+- `FGLTEST_PORT` — overrides the config's `port`, so concurrent runs on one
+  machine can each use their own scenario server; an invalid value (or an
+  out-of-range `port`) is a setup error (exit 2).
+- `script.requirements(command)` / `script.commands()` — the action-file
+  command table, for tooling. `core.shellArg(s)` / `core.quoteArg(s, windows)`
+  — quote one argument for a command run with `RUN`.
+- `cli.expandEnv(s)`; `core.checkShape(b, o, where, spec)` / `core.jsonKey()` /
+  `core.problem()` — the JSON shape checks both validators use;
+  `ggcdriver.sessionOver(code, msg)` — which GGC statuses end the session.
+- `make check` runs the self-tests under both `FGL_LENGTH_SEMANTICS=BYTE` (the
+  default) and `CHAR`, and fails if no UTF-8 locale is active; CI sets
+  `LANG: C.UTF-8`.
+- `server.ensure(port, idle, timeout)` — starts a scenario server only if none
+  is listening, and says whether it did. `driver.CURRENT_WINDOW` — the
+  `auiPart()` selector for the current window.
+- `incomplete` in `fgltest.summary.json`: suite processes that ended without
+  completing.
+- Install and run instructions for the fglpkg package (README "Install",
+  USERGUIDE §3.1 and §6.2).
+- Self-tests for the CLI's config handling, suite command, result folding and
+  stale-file cleanup (a new `cli` module holds that logic); for window-scoped
+  introspection, crash detection and server ownership; and, through
+  `tests/runnersuite.4gl` run as a subprocess, for a suite process that dies
+  part-way, trapped runtime errors, failing hooks and a crashed application.
 
 ## [1.0.0] - 2026-09-10
 
@@ -164,7 +366,8 @@ First public release.
 - **`Driver` INTERFACE** seam over `IMPORT FGL ggc` (default `ggcdriver`), so an
   alternate backend can be substituted without touching suites.
 
-[Unreleased]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v0.1.0...v0.2.0

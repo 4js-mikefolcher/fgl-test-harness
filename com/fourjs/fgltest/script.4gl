@@ -67,6 +67,16 @@ END RECORD
 
 PRIVATE DEFINE m_file ActionFile
 
+# The shape of an action file, object by object (see core.checkShape). "column"
+# and "row" reach the record through json_name, which the JSON parser matches
+# exactly, so they must be spelled exactly; other keys match without regard to
+# case, as the parser matches them.
+PRIVATE CONSTANT FILE_SPEC = "application:string,beforeAll:array,beforeEach:array,afterEach:array,afterAll:array,tests:array"
+PRIVATE CONSTANT TEST_SPEC = "name:string,skip:boolean,only:boolean,steps:array"
+PRIVATE CONSTANT STEP_SPEC = "command:string,target:string,=column:string,=row:int,value:any"
+# The command table: command -> requirement letters (see commandTable()).
+PRIVATE DEFINE m_commands DICTIONARY OF STRING
+
 # ------------------------------------------------------------------ load ----
 
 #+ Read and parse an action file into the module-static model.
@@ -75,35 +85,148 @@ PRIVATE DEFINE m_file ActionFile
 #+ @return NULL on success, else a human-readable error message
 PUBLIC FUNCTION load(path STRING) RETURNS STRING
     DEFINE txt STRING
+    DEFINE b base.StringBuffer
+
     LET txt = readFile(path)
     IF txt IS NULL THEN
         RETURN SFMT("cannot read action file '%1'", path)
     END IF
+    # Parse onto a clean model: a member absent from this file must not keep
+    # the value an earlier load gave it.
+    LET m_file.application = NULL
+    CALL m_file.beforeAll.clear()
+    CALL m_file.beforeEach.clear()
+    CALL m_file.afterEach.clear()
+    CALL m_file.afterAll.clear()
+    CALL m_file.tests.clear()
     TRY
         CALL util.JSON.parse(txt, m_file)
     CATCH
         RETURN SFMT("invalid JSON in action file '%1'", path)
     END TRY
+
+    LET b = base.StringBuffer.create()
+    CALL checkShape(b, txt)
     IF m_file.application IS NULL OR LENGTH(m_file.application) == 0 THEN
-        RETURN SFMT("action file '%1' has no \"application\"", path)
+        CALL core.problem(b, "no \"application\"")
     END IF
-    RETURN checkModel(path)
+    CALL checkModel(b)
+    IF b.getLength() == 0 THEN
+        RETURN NULL
+    END IF
+    RETURN SFMT("action file '%1' is not valid:%2%3", path, ASCII 10, b.toString())
+END FUNCTION
+
+# Unknown keys and wrongly typed values, read from the raw JSON: the parser
+# drops a key it cannot place ("skipp": true would run the test) and turns a
+# value of the wrong type into NULL or truncates it ("row": 1.5 is row 1).
+PRIVATE FUNCTION checkShape(b base.StringBuffer, txt STRING)
+    DEFINE obj, t util.JSONObject
+    DEFINE arr util.JSONArray
+    DEFINE i INTEGER
+    DEFINE k, where STRING
+
+    TRY
+        LET obj = util.JSONObject.parse(txt)
+    CATCH
+        CALL core.problem(b, "the file must hold a JSON object")
+        RETURN
+    END TRY
+    CALL core.checkShape(b, obj, "the file", FILE_SPEC)
+    CALL checkStepShapes(b, obj, "beforeAll", "beforeAll", m_file.beforeAll)
+    CALL checkStepShapes(b, obj, "beforeEach", "beforeEach", m_file.beforeEach)
+    CALL checkStepShapes(b, obj, "afterEach", "afterEach", m_file.afterEach)
+    CALL checkStepShapes(b, obj, "afterAll", "afterAll", m_file.afterAll)
+    # Check a type before reading through it: assigning an object to the wrong
+    # class is a -1260 that TRY/CATCH does not catch.
+    LET k = core.jsonKey(obj, "tests")
+    IF k IS NULL OR obj.getType(k) != "ARRAY" THEN
+        RETURN
+    END IF
+    LET arr = obj.get(k)
+    FOR i = 1 TO arr.getLength()
+        IF arr.getType(i) != "OBJECT" THEN
+            CALL core.problem(b, SFMT("test #%1 must be an object", i))
+            CONTINUE FOR
+        END IF
+        LET t = arr.get(i)
+        LET where = testLabel(t, i)
+        CALL core.checkShape(b, t, where, TEST_SPEC)
+        IF i <= m_file.tests.getLength() THEN
+            CALL checkStepShapes(b, t, "steps", where, m_file.tests[i].steps)
+        END IF
+    END FOR
+END FUNCTION
+
+# The shape of each step in the list `o` holds under `key` (if it holds one),
+# and the parsed `steps` they became.
+#
+# A count written as a JSON number is normalised in `steps`: the parser gives
+# a STRING member the number's JSON text, so 5.0 or 1e3 would read "5.0" /
+# "1e3", which isCount() rejects, though the schema (rightly) calls them whole
+# numbers. Only whole-number commands are touched: for assertField, say, the
+# text is compared as written.
+PRIVATE FUNCTION checkStepShapes(b base.StringBuffer, o util.JSONObject, key STRING,
+    where STRING, steps StepList)
+    DEFINE arr util.JSONArray
+    DEFINE st util.JSONObject
+    DEFINE j INTEGER
+    DEFINE k, vk STRING
+    DEFINE f FLOAT
+    DEFINE n BIGINT
+
+    LET k = core.jsonKey(o, key)
+    IF k IS NULL OR o.getType(k) != "ARRAY" THEN
+        RETURN
+    END IF
+    LET arr = o.get(k)
+    FOR j = 1 TO arr.getLength()
+        IF arr.getType(j) == "OBJECT" THEN
+            LET st = arr.get(j)
+            CALL core.checkShape(b, st, SFMT("%1 step %2", where, j), STEP_SPEC)
+            LET vk = core.jsonKey(st, "value")
+            IF vk IS NOT NULL AND j <= steps.getLength() THEN
+                IF st.getType(vk) == "NUMBER" AND needs(requirements(steps[j].command), "n") THEN
+                    LET f = st.get(vk)
+                    IF core.isWhole(f) THEN
+                        LET n = f
+                        LET steps[j].value = n
+                    END IF
+                END IF
+            END IF
+        ELSE
+            CALL core.problem(b, SFMT("%1 step %2 must be an object", where, j))
+        END IF
+    END FOR
+END FUNCTION
+
+# "test 'name'" when the test object has a string name, else "test #i".
+PRIVATE FUNCTION testLabel(t util.JSONObject, i INTEGER) RETURNS STRING
+    DEFINE k, name STRING
+    LET k = core.jsonKey(t, "name")
+    IF k IS NOT NULL THEN
+        IF t.getType(k) == "STRING" THEN
+            LET name = t.get(k)
+            RETURN SFMT("test '%1'", name)
+        END IF
+    END IF
+    RETURN SFMT("test #%1", i)
 END FUNCTION
 
 # ------------------------------------------------------------ validate ----
 
-#+ Check the loaded model before anything is launched: an unknown command or a
-#+ missing target/value is a typo in the action file, and catching it here
-#+ reports every problem at once instead of failing one test deep into a run
-#+ that has already started an application.
+#+ Check the loaded model before anything is launched: an unknown command, a
+#+ missing target/value/column/row, a count that is not a number or a test name
+#+ used twice is a mistake in the action file, and catching it here reports
+#+ every problem at once instead of failing one test deep into a run that has
+#+ already started an application.
 #+
-#+ @param path the action-file path (for the message)
-#+ @return NULL when valid, else a multi-line description of every problem
-PRIVATE FUNCTION checkModel(path STRING) RETURNS STRING
-    DEFINE b base.StringBuffer
+#+ @param b collects one "  - " line per problem
+PRIVATE FUNCTION checkModel(b base.StringBuffer)
     DEFINE i, n INTEGER
+    DEFINE seen DICTIONARY OF INTEGER
+    DEFINE name STRING
 
-    LET b = base.StringBuffer.create()
     CALL checkSteps(b, "beforeAll", m_file.beforeAll)
     CALL checkSteps(b, "beforeEach", m_file.beforeEach)
     CALL checkSteps(b, "afterEach", m_file.afterEach)
@@ -114,98 +237,160 @@ PRIVATE FUNCTION checkModel(path STRING) RETURNS STRING
         CALL addProblem(b, "no \"tests\" declared")
     END IF
     FOR i = 1 TO n
-        IF m_file.tests[i].name IS NULL OR LENGTH(m_file.tests[i].name) == 0 THEN
+        LET name = m_file.tests[i].name
+        IF name IS NULL OR LENGTH(name) == 0 THEN
             CALL addProblem(b, SFMT("test #%1 has no \"name\"", i))
+        ELSE
+            # A name identifies a test in the reports and selects it in
+            # isolate mode, so two tests may not share one.
+            IF seen.contains(name) THEN
+                CALL addProblem(b, SFMT("test #%1 reuses the name '%2' of test #%3 — test names must be unique",
+                    i, name, seen[name]))
+            ELSE
+                LET seen[name] = i
+            END IF
         END IF
         IF m_file.tests[i].steps.getLength() == 0 THEN
             CALL addProblem(b,
-                SFMT("test '%1' has no \"steps\"", m_file.tests[i].name))
+                SFMT("test '%1' has no \"steps\"", name))
         END IF
-        CALL checkSteps(b, SFMT("test '%1'", m_file.tests[i].name),
-            m_file.tests[i].steps)
+        CALL checkSteps(b, SFMT("test '%1'", name), m_file.tests[i].steps)
     END FOR
-
-    IF b.getLength() == 0 THEN
-        RETURN NULL
-    END IF
-    RETURN SFMT("action file '%1' is not valid:%2%3", path, ASCII 10, b.toString())
 END FUNCTION
 
 PRIVATE FUNCTION checkSteps(b base.StringBuffer, where STRING, steps StepList)
     DEFINE i INTEGER
-    DEFINE known, needsTarget, needsValue BOOLEAN
+    DEFINE req, at STRING
     FOR i = 1 TO steps.getLength()
-        CALL commandSpec(steps[i].command) RETURNING known, needsTarget, needsValue
-        IF NOT known THEN
-            CALL addProblem(b, SFMT("%1 step %2: unknown command '%3'",
-                where, i, steps[i].command))
+        LET at = SFMT("%1 step %2", where, i)
+        LET req = requirements(steps[i].command)
+        IF req IS NULL THEN
+            CALL addProblem(b, SFMT("%1: unknown command '%2'", at, steps[i].command))
             CONTINUE FOR
         END IF
-        IF needsTarget AND LENGTH(steps[i].target) == 0 THEN
-            CALL addProblem(b, SFMT("%1 step %2: command '%3' needs a \"target\"",
-                where, i, steps[i].command))
+        IF needs(req, "t") AND LENGTH(steps[i].target) == 0 THEN
+            CALL addProblem(b, SFMT("%1: command '%2' needs a \"target\"", at, steps[i].command))
         END IF
-        IF needsValue AND steps[i].value IS NULL THEN
-            CALL addProblem(b, SFMT("%1 step %2: command '%3' needs a \"value\"",
-                where, i, steps[i].command))
+        IF needs(req, "c") AND LENGTH(steps[i].col) == 0 THEN
+            CALL addProblem(b, SFMT("%1: command '%2' needs a \"column\"", at, steps[i].command))
+        END IF
+        IF needs(req, "r") AND (steps[i].rowNum IS NULL OR steps[i].rowNum < 1) THEN
+            CALL addProblem(b, SFMT("%1: command '%2' needs a \"row\" (1 or more)", at, steps[i].command))
+        END IF
+        IF NOT needs(req, "r") AND steps[i].rowNum < 1 THEN
+            CALL addProblem(b, SFMT("%1: \"row\" must be 1 or more", at))
+        END IF
+        IF needs(req, "v") AND steps[i].value IS NULL THEN
+            CALL addProblem(b, SFMT("%1: command '%2' needs a \"value\"", at, steps[i].command))
+        ELSE
+            # A count or a delay that is not a number would quietly become
+            # NULL at run time and fail with a confusing message.
+            IF needs(req, "n") AND NOT isCount(steps[i].value) THEN
+                CALL addProblem(b, SFMT("%1: command '%2' needs a whole-number \"value\", not '%3'",
+                    at, steps[i].command, steps[i].value))
+            END IF
         END IF
     END FOR
 END FUNCTION
 
 PRIVATE FUNCTION addProblem(b base.StringBuffer, msg STRING)
-    CALL b.append("  - ")
-    CALL b.append(msg)
-    CALL b.append(ASCII 10)
+    CALL core.problem(b, msg)
 END FUNCTION
 
-#+ Is the command known, and what does it require? Kept next to exec()'s CASE —
-#+ the two lists must stay in step, so a new command is added to both.
-PRIVATE FUNCTION commandSpec(cmd STRING) RETURNS (BOOLEAN, BOOLEAN, BOOLEAN)
-    CASE cmd
-        # interaction
-        WHEN "action"       RETURN TRUE, TRUE, FALSE
-        WHEN "field"        RETURN TRUE, TRUE, FALSE
-        WHEN "enter"        RETURN TRUE, FALSE, TRUE
-        WHEN "fill"         RETURN TRUE, TRUE, TRUE
-        WHEN "clear"        RETURN TRUE, FALSE, FALSE
-        WHEN "key"          RETURN TRUE, TRUE, FALSE
-        WHEN "pause"        RETURN TRUE, FALSE, TRUE
-        WHEN "selectRow"    RETURN TRUE, TRUE, FALSE
-        WHEN "focusCell"    RETURN TRUE, TRUE, FALSE
-        # scalar assertions
-        WHEN "assertField"          RETURN TRUE, TRUE, TRUE
-        WHEN "assertFieldNot"       RETURN TRUE, TRUE, TRUE
-        WHEN "assertFieldContains"  RETURN TRUE, TRUE, TRUE
-        WHEN "assertFieldMatches"   RETURN TRUE, TRUE, TRUE
-        WHEN "assertCurrent"        RETURN TRUE, FALSE, TRUE
-        WHEN "assertFormName"       RETURN TRUE, FALSE, TRUE
-        WHEN "assertFormTitle"      RETURN TRUE, FALSE, TRUE
-        WHEN "assertWindowName"     RETURN TRUE, FALSE, TRUE
-        WHEN "assertWindowTitle"    RETURN TRUE, FALSE, TRUE
-        # action / field state
-        WHEN "assertActionActive"   RETURN TRUE, TRUE, FALSE
-        WHEN "assertActionInactive" RETURN TRUE, TRUE, FALSE
-        WHEN "assertActionExists"   RETURN TRUE, TRUE, FALSE
-        WHEN "assertActionMissing"  RETURN TRUE, TRUE, FALSE
-        WHEN "assertFieldEnabled"   RETURN TRUE, TRUE, FALSE
-        WHEN "assertFieldDisabled"  RETURN TRUE, TRUE, FALSE
-        WHEN "assertFieldEditable"  RETURN TRUE, TRUE, FALSE
-        WHEN "assertFieldReadOnly"  RETURN TRUE, TRUE, FALSE
-        WHEN "assertFieldExists"    RETURN TRUE, TRUE, FALSE
-        WHEN "assertFieldMissing"   RETURN TRUE, TRUE, FALSE
-        WHEN "assertFieldCount"     RETURN TRUE, FALSE, TRUE
-        # tables
-        WHEN "assertTableExists"    RETURN TRUE, TRUE, FALSE
-        WHEN "assertCell"           RETURN TRUE, TRUE, TRUE
-        WHEN "assertCellContains"   RETURN TRUE, TRUE, TRUE
-        WHEN "assertCellMatches"    RETURN TRUE, TRUE, TRUE
-        WHEN "assertCellAtRow"      RETURN TRUE, TRUE, TRUE
-        WHEN "assertRowCount"       RETURN TRUE, TRUE, TRUE
-        WHEN "assertRowCountAtLeast" RETURN TRUE, TRUE, TRUE
-        WHEN "assertRowCountAtMost" RETURN TRUE, TRUE, TRUE
-        WHEN "assertCurrentRow"     RETURN TRUE, TRUE, TRUE
-    END CASE
-    RETURN FALSE, FALSE, FALSE
+# The command table: every command an action file may use, and what it
+# requires, one letter per requirement —
+#   t  a "target"              c  a "column"
+#   v  a "value"               r  a "row" (1-based)
+#   n  a whole-number "value"  -  nothing
+# It is the single list of commands: validation reads it, a self-test runs each
+# command through exec()'s CASE, and another checks that
+# schema/action-file.schema.json says the same. A new command goes here and in
+# exec(), and the schema is updated to match. (Filled on first use.)
+PRIVATE FUNCTION commandTable()
+    IF m_commands.getLength() > 0 THEN
+        RETURN
+    END IF
+    # interaction
+    LET m_commands["action"] = "t"
+    LET m_commands["field"] = "t"
+    LET m_commands["enter"] = "v"
+    LET m_commands["fill"] = "tv"
+    LET m_commands["clear"] = "-"
+    LET m_commands["key"] = "t"
+    LET m_commands["pause"] = "vn"
+    LET m_commands["selectRow"] = "tr"
+    LET m_commands["focusCell"] = "tcr"
+    # scalar assertions
+    LET m_commands["assertField"] = "tv"
+    LET m_commands["assertFieldNot"] = "tv"
+    LET m_commands["assertFieldContains"] = "tv"
+    LET m_commands["assertFieldMatches"] = "tv"
+    LET m_commands["assertCurrent"] = "v"
+    LET m_commands["assertFormName"] = "v"
+    LET m_commands["assertFormTitle"] = "v"
+    LET m_commands["assertWindowName"] = "v"
+    LET m_commands["assertWindowTitle"] = "v"
+    # action / field state
+    LET m_commands["assertActionActive"] = "t"
+    LET m_commands["assertActionInactive"] = "t"
+    LET m_commands["assertActionExists"] = "t"
+    LET m_commands["assertActionMissing"] = "t"
+    LET m_commands["assertFieldEnabled"] = "t"
+    LET m_commands["assertFieldDisabled"] = "t"
+    LET m_commands["assertFieldEditable"] = "t"
+    LET m_commands["assertFieldReadOnly"] = "t"
+    LET m_commands["assertFieldExists"] = "t"
+    LET m_commands["assertFieldMissing"] = "t"
+    LET m_commands["assertFieldCount"] = "vn"
+    # tables
+    LET m_commands["assertTableExists"] = "t"
+    LET m_commands["assertCell"] = "tcv"
+    LET m_commands["assertCellContains"] = "tcv"
+    LET m_commands["assertCellMatches"] = "tcv"
+    LET m_commands["assertCellAtRow"] = "tcrv"
+    LET m_commands["assertRowCount"] = "tvn"
+    LET m_commands["assertRowCountAtLeast"] = "tvn"
+    LET m_commands["assertRowCountAtMost"] = "tvn"
+    LET m_commands["assertCurrentRow"] = "tvn"
+END FUNCTION
+
+#+ What an action-file command requires: letters from the command table
+#+ (t target, v value, n whole-number value, c column, r row), "-" when it needs
+#+ nothing, or NULL if there is no such command.
+PUBLIC FUNCTION requirements(command STRING) RETURNS STRING
+    CALL commandTable()
+    IF command IS NULL OR NOT m_commands.contains(command) THEN
+        RETURN NULL
+    END IF
+    RETURN m_commands[command]
+END FUNCTION
+
+#+ Every command an action file may use, in alphabetical order.
+PUBLIC FUNCTION commands() RETURNS inspect.StringList
+    DEFINE r inspect.StringList
+    CALL commandTable()
+    LET r = m_commands.getKeys()
+    CALL r.sort(NULL, FALSE)
+    RETURN r
+END FUNCTION
+
+# TRUE if requirement letter `what` is in `req`.
+PRIVATE FUNCTION needs(req STRING, what STRING) RETURNS BOOLEAN
+    IF req.getIndexOf(what, 1) > 0 THEN
+        RETURN TRUE
+    END IF
+    RETURN FALSE
+END FUNCTION
+
+# TRUE if v is a whole number that fits an INTEGER count or delay.
+PRIVATE FUNCTION isCount(v STRING) RETURNS BOOLEAN
+    IF v IS NULL OR LENGTH(v) == 0 OR LENGTH(v) > 9 THEN
+        RETURN FALSE
+    END IF
+    IF v.matches("^[0-9]+$") THEN
+        RETURN TRUE
+    END IF
+    RETURN FALSE
 END FUNCTION
 
 # ------------------------------------------------------------------ exec ----

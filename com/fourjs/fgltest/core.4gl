@@ -4,10 +4,11 @@
 PACKAGE com.fourjs.fgltest
 
 IMPORT util
+IMPORT os
 IMPORT FGL com.fourjs.fgltest.driver
 
 #+ Package version. Keep in step with fglpkg.json and CHANGELOG.md.
-PUBLIC CONSTANT VERSION = "1.0.0"
+PUBLIC CONSTANT VERSION = "1.1.0"
 
 
 #+ One recorded assertion outcome.
@@ -87,6 +88,297 @@ PUBLIC FUNCTION nowSeconds() RETURNS FLOAT
     RETURN util.Datetime.toSecondsSinceEpoch(util.Datetime.getCurrentAsUTC())
 END FUNCTION
 
+# --------------------------------------------------------------- shell ----
+
+#+ `s` as one double-quoted argument for a command run with RUN, quoted by the
+#+ rules of sh on POSIX systems and of the C runtime's argument parser on
+#+ Windows, so the value arrives exactly as given — quotes, backslashes, `$`
+#+ and backticks included. (fgltest expands `$NAME` in config values itself,
+#+ before quoting; see cli.expandEnv.) One exception on Windows: cmd.exe
+#+ expands `%NAME%` even inside double quotes, and has no reliable escape for
+#+ it there, so a value holding `%NAME%` is expanded by the shell.
+PUBLIC FUNCTION shellArg(s STRING) RETURNS STRING
+    RETURN quoteArg(s, os.Path.separator() == "\\")
+END FUNCTION
+
+#+ shellArg() for a given platform (windows = TRUE for the Windows rules).
+#+
+#+ Built only from getIndexOf(), subString() and StringBuffer.replace(), which
+#+ agree on positions under either FGL_LENGTH_SEMANTICS. Walking getCharAt() up
+#+ to getLength() would split multibyte characters under BYTE semantics (the
+#+ default), corrupting any non-ASCII path.
+PUBLIC FUNCTION quoteArg(s STRING, windows BOOLEAN) RETURNS STRING
+    DEFINE e, r base.StringBuffer
+
+    LET e = base.StringBuffer.create()
+    IF isTrue(windows) THEN
+        CALL e.append(windowsEscape(s))
+    ELSE
+        # Inside double quotes sh gives \ " $ and ` meaning: escape them all.
+        CALL e.append(s)
+        CALL e.replace("\\", "\\\\", 0)
+        CALL e.replace('"', '\\"', 0)
+        CALL e.replace("$", "\\$", 0)
+        CALL e.replace("`", "\\`", 0)
+    END IF
+    LET r = base.StringBuffer.create()
+    CALL r.append('"')
+    CALL r.append(e.toString())
+    CALL r.append('"')
+    RETURN r.toString()
+END FUNCTION
+
+# The C runtime's rule: backslashes are literal unless they precede a quote;
+# then each is doubled and the quote escaped. Trailing backslashes are doubled
+# too, so they cannot escape the closing quote. Only ASCII positions are
+# inspected, so multibyte text is copied through untouched.
+PRIVATE FUNCTION windowsEscape(s STRING) RETURNS STRING
+    DEFINE r base.StringBuffer
+    DEFINE start, q, n, k, len INTEGER
+
+    LET r = base.StringBuffer.create()
+    LET len = s.getLength()
+    LET start = 1
+    WHILE start <= len
+        LET q = s.getIndexOf('"', start)
+        IF q == 0 THEN
+            EXIT WHILE
+        END IF
+        LET n = backslashesBefore(s, q, start)
+        IF q > start THEN
+            CALL r.append(s.subString(start, q - 1))   -- includes those n
+        END IF
+        FOR k = 1 TO n + 1
+            CALL r.append("\\")
+        END FOR
+        CALL r.append('"')
+        LET start = q + 1
+    END WHILE
+    IF start <= len THEN
+        CALL r.append(s.subString(start, len))
+        LET n = backslashesBefore(s, len + 1, start)
+        FOR k = 1 TO n
+            CALL r.append("\\")
+        END FOR
+    END IF
+    RETURN r.toString()
+END FUNCTION
+
+# How many backslashes run up to (not including) position pos, from no
+# earlier than position floor.
+PRIVATE FUNCTION backslashesBefore(s STRING, pos INTEGER, floor INTEGER) RETURNS INTEGER
+    DEFINE n, i INTEGER
+    LET n = 0
+    LET i = pos - 1
+    WHILE i >= floor
+        IF s.getCharAt(i) != "\\" THEN
+            EXIT WHILE
+        END IF
+        LET n = n + 1
+        LET i = i - 1
+    END WHILE
+    RETURN n
+END FUNCTION
+
+# ----------------------------------------------------------- JSON shape ----
+
+#+ Check a parsed JSON object against a shape, appending a "  - " line to `b`
+#+ for every problem: a key the shape does not list (a typo the JSON parser
+#+ would otherwise drop silently), or a value util.JSON.parse cannot convert
+#+ to the member's type without losing it — it would become NULL ("30s" for a
+#+ number, "yes" for a boolean) or be truncated (6.5 for a whole number).
+#+ What the parser does convert cleanly is accepted, as it always was: "60"
+#+ for a whole number, 1 / 0 or "1" / "0" for a boolean, 5 for a string.
+#+
+#+ `spec` is a comma-separated list of key:type, type being string, number,
+#+ int (a whole number), boolean, object, array or any. Keys match without
+#+ regard to case, as util.JSON.parse matches them to record members; a key
+#+ written "=key" must match exactly, for a member renamed with json_name,
+#+ which the parser matches exactly. Keys starting with "$" or "_" (a
+#+ "$schema", a "_comment") are always allowed; a JSON null is always accepted.
+PUBLIC FUNCTION checkShape(b base.StringBuffer, o util.JSONObject, where STRING, spec STRING)
+    DEFINE i INTEGER
+    DEFINE k, expected, actual STRING
+
+    FOR i = 1 TO o.getLength()
+        LET k = o.name(i)
+        IF k.getIndexOf("$", 1) == 1 OR k.getIndexOf("_", 1) == 1 THEN
+            CONTINUE FOR
+        END IF
+        LET expected = specType(spec, k)
+        IF expected IS NULL THEN
+            CALL problem(b, SFMT('%1: unknown key "%2" (known keys: %3)', where, k, specKeys(spec)))
+            CONTINUE FOR
+        END IF
+        LET actual = o.getType(k)
+        IF actual == "NULL" OR expected == "any" THEN
+            CONTINUE FOR
+        END IF
+        IF NOT typeFits(o, k, expected, actual) THEN
+            CALL problem(b, SFMT('%1: "%2" must be %3, not %4', where, k,
+                describeType(expected), describeValue(o, k, actual)))
+        END IF
+    END FOR
+END FUNCTION
+
+#+ The key of `o` that matches `name` without regard to case (NULL if none),
+#+ for reading a member the way util.JSON.parse would.
+PUBLIC FUNCTION jsonKey(o util.JSONObject, name STRING) RETURNS STRING
+    DEFINE i INTEGER
+    DEFINE k STRING
+    FOR i = 1 TO o.getLength()
+        LET k = o.name(i)
+        IF k.toLowerCase() == name.toLowerCase() THEN
+            RETURN k
+        END IF
+    END FOR
+    RETURN NULL
+END FUNCTION
+
+#+ Append one "  - msg" problem line, the format every validator reports in.
+PUBLIC FUNCTION problem(b base.StringBuffer, msg STRING)
+    CALL b.append("  - ")
+    CALL b.append(msg)
+    CALL b.append(ASCII 10)
+END FUNCTION
+
+# The type `spec` gives key k (NULL if the key is not in it).
+PRIVATE FUNCTION specType(spec STRING, k STRING) RETURNS STRING
+    DEFINE tok base.StringTokenizer
+    DEFINE entry, key STRING
+    DEFINE colon INTEGER
+    DEFINE exact BOOLEAN
+
+    LET tok = base.StringTokenizer.create(spec, ",")
+    WHILE tok.hasMoreTokens()
+        LET entry = tok.nextToken()
+        LET colon = entry.getIndexOf(":", 1)
+        LET key = entry.subString(1, colon - 1)
+        LET exact = (key.getIndexOf("=", 1) == 1)
+        IF exact THEN
+            LET key = key.subString(2, key.getLength())
+            IF key == k THEN
+                RETURN entry.subString(colon + 1, entry.getLength())
+            END IF
+        ELSE
+            IF key.toLowerCase() == k.toLowerCase() THEN
+                RETURN entry.subString(colon + 1, entry.getLength())
+            END IF
+        END IF
+    END WHILE
+    RETURN NULL
+END FUNCTION
+
+# The keys of `spec`, for a message.
+PRIVATE FUNCTION specKeys(spec STRING) RETURNS STRING
+    DEFINE tok base.StringTokenizer
+    DEFINE entry, key STRING
+    DEFINE r base.StringBuffer
+
+    LET r = base.StringBuffer.create()
+    LET tok = base.StringTokenizer.create(spec, ",")
+    WHILE tok.hasMoreTokens()
+        LET entry = tok.nextToken()
+        LET key = entry.subString(1, entry.getIndexOf(":", 1) - 1)
+        IF key.getIndexOf("=", 1) == 1 THEN
+            LET key = key.subString(2, key.getLength())
+        END IF
+        IF r.getLength() > 0 THEN
+            CALL r.append(", ")
+        END IF
+        CALL r.append(key)
+    END WHILE
+    RETURN r.toString()
+END FUNCTION
+
+PRIVATE FUNCTION typeFits(o util.JSONObject, k STRING, expected STRING, actual STRING) RETURNS BOOLEAN
+    DEFINE f FLOAT
+    DEFINE v STRING
+    CASE expected
+        WHEN "string"
+            -- a number's JSON text becomes the string, as the parser does
+            RETURN (actual == "STRING" OR actual == "NUMBER")
+        WHEN "number"
+            IF actual == "NUMBER" THEN
+                RETURN TRUE
+            END IF
+            IF actual == "STRING" THEN
+                LET v = o.get(k)
+                RETURN v.matches("^ *[-+]?[0-9]+([.][0-9]+)? *$")
+            END IF
+            RETURN FALSE
+        WHEN "int"
+            IF actual == "NUMBER" THEN
+                LET f = o.get(k)
+                RETURN isWhole(f)   -- 5.0 and 1e3 are whole; 6.5 would be cut
+            END IF
+            IF actual == "STRING" THEN
+                LET v = o.get(k)
+                RETURN v.matches("^ *[-+]?[0-9]+ *$")
+            END IF
+            RETURN FALSE
+        WHEN "boolean"
+            IF actual == "BOOLEAN" THEN
+                RETURN TRUE
+            END IF
+            IF actual == "NUMBER" THEN
+                LET f = o.get(k)
+                RETURN (f == 0 OR f == 1)
+            END IF
+            IF actual == "STRING" THEN
+                LET v = o.get(k)
+                RETURN v.matches("^ *[01] *$")
+            END IF
+            RETURN FALSE
+        WHEN "object" RETURN (actual == "OBJECT")
+        WHEN "array" RETURN (actual == "ARRAY")
+    END CASE
+    RETURN FALSE
+END FUNCTION
+
+#+ TRUE if f is a whole number that fits a BIGINT.
+PUBLIC FUNCTION isWhole(f FLOAT) RETURNS BOOLEAN
+    DEFINE n BIGINT
+    IF f IS NULL THEN
+        RETURN FALSE
+    END IF
+    LET n = f
+    IF n IS NULL OR n != f THEN
+        RETURN FALSE
+    END IF
+    RETURN TRUE
+END FUNCTION
+
+PRIVATE FUNCTION describeType(t STRING) RETURNS STRING
+    CASE t
+        WHEN "string" RETURN "a string"
+        WHEN "number" RETURN "a number"
+        WHEN "int" RETURN "a whole number"
+        WHEN "boolean" RETURN "true or false (or 1 / 0)"
+        WHEN "object" RETURN "an object"
+        WHEN "array" RETURN "a list"
+    END CASE
+    RETURN t
+END FUNCTION
+
+# A value as a message shows it: a scalar with its text, a container by kind.
+PRIVATE FUNCTION describeValue(o util.JSONObject, k STRING, actual STRING) RETURNS STRING
+    DEFINE v STRING
+    DEFINE f FLOAT
+    CASE actual
+        WHEN "STRING"
+            LET v = o.get(k)
+            RETURN SFMT('the string "%1"', v)
+        WHEN "NUMBER"
+            LET f = o.get(k)
+            RETURN SFMT("%1", f)
+        WHEN "BOOLEAN" RETURN "a boolean"
+        WHEN "OBJECT" RETURN "an object"
+        WHEN "ARRAY" RETURN "a list"
+    END CASE
+    RETURN actual
+END FUNCTION
+
 # ------------------------------------------------------- driver errors ----
 
 #+ Record a driver error for the current test. The FIRST error is kept (it is
@@ -122,6 +414,11 @@ END FUNCTION
 #+ TRUE once the session is unrecoverable; the runner stops scheduling tests.
 PUBLIC FUNCTION isFatal() RETURNS BOOLEAN
     RETURN g_fatal
+END FUNCTION
+
+#+ Forget an unrecoverable session (a fresh run starts with a live one).
+PUBLIC FUNCTION clearFatal()
+    LET g_fatal = FALSE
 END FUNCTION
 
 # ------------------------------------------------------ assertion results ----

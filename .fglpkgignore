@@ -1,0 +1,14 @@
+# fgltest's own test suite and its fake driver are development-only: they live
+# outside the package root, but list them here so the intent is explicit and a
+# future `root` change cannot start shipping them.
+tests/
+
+# The bundled demo application is documentation, not library content.
+examples/
+
+# Local run output.
+results/
+
+# Tooling/editor state.
+.claude/
+.mcp.json

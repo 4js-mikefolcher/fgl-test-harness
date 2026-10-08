@@ -17,6 +17,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A UTF-8 locale, as Genero itself expects. The self-tests' multibyte cases
+# only catch a string bug under FGL_LENGTH_SEMANTICS=BYTE when the locale is
+# UTF-8, and a runner started as a service often has no LANG at all; selftest
+# fails loudly rather than pass vacuously without one.
+env:
+  LANG: C.UTF-8
+
 jobs:
   build:
     name: Build, self-test and lint
