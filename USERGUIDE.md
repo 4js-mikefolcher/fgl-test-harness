@@ -52,7 +52,24 @@ export FGLLDPATH="$(pwd):$FGLLDPATH"
 
 ---
 
-## 3. Build
+## 3. Install or build
+
+### 3.1 Install with fglpkg
+
+Add the package to your project as a dev dependency, then activate it alongside
+the GGC environment:
+
+```
+fglpkg install --save-dev 4js-fgltest
+eval "$(fglpkg env)"                         # the package root goes on FGLLDPATH
+source "$FGLDIR/testing_utilities/ggc/envggc"
+```
+
+Your suites now compile with a plain `fglcomp -M`, and the two programs are in
+`.fglpkg/packages/4js-fgltest/com/fourjs/fgltest/`. §6.2 shows how to run the
+CLI.
+
+### 3.2 Build from source
 
 ```
 make          # builds com/fourjs/fgltest/*.42m (library + the fgltest and
@@ -132,11 +149,45 @@ END FUNCTION
 | `beforeAll(fn)` / `afterAll(fn)` | Run once, before/after all tests. |
 | `beforeEach(fn)` / `afterEach(fn)` | Run around every test. |
 | `run()` | Connect, run every registered test, report, set the exit code. |
+| `runWith(driver)` | Run every registered test against the given `Driver`, with no GGC session (for an alternative driver, or testing with an in-memory one). Results via `getOutcomes()`. |
 
 Hooks are additive — register several and they run in order.
 
+**Test names must be unique.** A name identifies the test in the reports and
+selects it in isolate mode, so a name registered twice is reported as an error
+(`not run: test #1 already has this name …`) and only its first test runs.
+
+**When a hook fails.** `beforeEach` / `afterEach` belong to their test: a
+failure in one fails or errors that test. `beforeAll` / `afterAll` are phases of
+their own. A `beforeAll` that fails (a check that does not hold, a driver error,
+a trapped runtime error) is reported as a `beforeAll hook` entry, and every test
+is reported `not run: the beforeAll hook failed` instead of running on a broken
+setup. `afterAll` always runs, so cleanup happens; if it fails it is reported as
+an `afterAll hook` entry. These entries appear only when a hook fails. Once the
+application under test has ended, an `afterAll` hook's interactions with it are
+bound to fail and are not counted against it — so a last test that closes the
+application, followed by an `afterAll` that would have closed it, still passes.
+
 A skipped test is neither a pass nor a failure: it appears as `<skipped/>` in
 JUnit, `# SKIP` in TAP, and never affects the exit code.
+
+**Runtime errors in tests.** A BDL runtime error inside a test or hook (a NULL
+object, a file that will not open, …) normally stops the program. To have the
+runner trap it instead — error that one test, still run its `afterEach`, and
+carry on — opt the suite module in. `WHENEVER` applies to every line after it
+in the same module and never crosses module boundaries, so place it in a
+function **above** your tests (the function never needs to be called):
+
+```4gl
+FUNCTION optInToRaise()
+    WHENEVER ANY ERROR RAISE
+END FUNCTION
+```
+
+The test then reports `runtime error -8083: Null pointer exception.`.
+Conversion errors in those functions are raised too, instead of silently
+producing NULL. Without the opt-in the suite process stops, and the reports
+(§7) mark that test "did not complete" and the remaining ones "not run".
 
 ### 4.2 Interaction verbs (`flow`)
 
@@ -221,16 +272,23 @@ hard-coding it.
 | `inspect.actionNames()` | Names of all actions. |
 | `inspect.activeActionNames()` | Names of currently-active actions only. |
 | `inspect.hasAction(name)` | Whether an action exists. |
-| `inspect.fields()` | All fields (union of form fields and table columns) with `active`/`hidden`/`readOnly`/`widget`/`varType`. |
+| `inspect.fields()` | All fields of the current window (union of form fields and table columns) with `active`/`hidden`/`readOnly`/`widget`/`varType`. |
 | `inspect.fieldNames()` | Names of all fields. |
 | `inspect.enabledFields()` | Names of enabled (active, not hidden) fields. |
 | `inspect.editableFields()` | Names of editable (active, not hidden, not read-only) fields. |
 | `inspect.formName()` / `inspect.windowName()` | Current form / window name. |
-| `inspect.tables()` | Names of tables/matrices on the form (the identifier the table calls/verbs expect). |
+| `inspect.tables()` | Names of tables/matrices on the current window's form (the identifier the table calls/verbs expect). |
 | `inspect.rowCount(table)` | Total number of rows. |
 | `inspect.currentRow(table)` | Current (focused) row, 1-based. |
 | `inspect.cellValue(table, column, row)` | Value at an explicit row (must be loaded — navigate first). |
 | `inspect.currentCellValue(table, column)` | Value of a column in the current row (always loaded). |
+| `inspect.applicationError()` | The runtime error the application under test stopped with (`Program stopped at …`), or NULL. The runner checks this after every test for you. |
+
+**Current window only.** The AUI tree keeps every open window, so with a modal
+child window up it also holds the parent's fields. The field and table queries
+read only the **current** window — the one the active dialog runs in — so
+`fieldNames()` inside a child window lists the child's fields, not the
+parent's as well.
 
 **Working with tables/lists.** The `table` argument is the name from
 `inspect.tables()` (the AUI `Table` `name`; the screen-record name also works).
@@ -338,14 +396,26 @@ Top-level keys: `application` (required), the optional hook step-lists
 | `assertCurrentRow` | `target` (table), `value` (n) | current row index |
 
 **Validation.** An action file is checked when it loads, before any application
-is started: an unknown command, or one missing its required `target` / `value`,
-is reported with every other problem in the file at once.
+is started, and every problem in the file is reported at once: an unknown
+command; a missing `target`, `value`, `column` or `row` (rows start at 1); a
+count or delay (`pause`, `assertFieldCount`, `assertRowCount*`,
+`assertCurrentRow`) that is not a whole number; and two tests with the same
+name.
 
 ```
 fgltest_json: action file 'tests/price.actions.json' is not valid:
   - test 'edits a price' step 2: unknown command 'assertFeild'
   - test 'edits a price' step 4: command 'action' needs a "target"
+  - test 'reads a cell' step 1: command 'assertCellAtRow' needs a "column"
+  - test 'counts rows' step 1: command 'assertRowCount' needs a whole-number "value", not 'five'
+  - test #4 reuses the name 'edits a price' of test #1 — test names must be unique
 ```
+
+A JSON Schema for action files, encoding the same rules, ships with the
+package: `schema/action-file.schema.json` (in a project install,
+`.fglpkg/packages/4js-fgltest/schema/action-file.schema.json`). Point an
+action file's `"$schema"` key at it, or map `*.actions.json` to it in your
+editor, for validation and completion as you type.
 
 **Skipping and focusing.** A test object may carry `"skip": true` (reported as
 skipped, never run) or `"only": true` (if any test is `only`, all others are
@@ -410,10 +480,10 @@ suite as a subprocess, merges the results, and exits non-zero if anything failed
 
 | Key | Meaning |
 |-----|---------|
-| `port` | Scenario-server port (default `6500`). |
+| `port` | Scenario-server port (default `6500`). The CLI starts the server on it and passes it to every suite. The `FGLTEST_PORT` environment variable overrides it (see §8). |
 | `reporters` | CSV of `console`, `junit`, `tap`, `json`. |
-| `outdir` | Directory for report files and logs (default `.`). |
-| `jsonRunner` | Program used to run `actions` suites (default `com/fourjs/fgltest/fgltest_json`). |
+| `outdir` | Directory for report files and logs (default: the config file's directory). |
+| `jsonRunner` | Program used to run `actions` suites (default: the `fgltest_json` beside the CLI). |
 | `isolate` | Run every suite's tests in isolated processes (see §6.3). Default `false`. |
 | `timeout` | Wall-clock limit per suite, in seconds (see §6.5). Default `0` — no limit. |
 | `discover` | Auto-discovery block (see §6.4). |
@@ -427,15 +497,43 @@ Each suite:
 | `module` | Compiled suite program to run **— or —** |
 | `actions` | Path to a JSON action file (run via `jsonRunner`). Use one of `module`/`actions`. |
 | `mode` | `tcp` (launch the app locally) or `ua` (drive a GAS-deployed app). |
-| `workdir`, `commandLine` | For `tcp`: the app's working directory and launch command. |
+| `workdir`, `commandLine` | For `tcp`: the app's working directory (default: the config's directory) and launch command (default: GGC's `fglrun <application>`). The command line reaches GGC as written — on POSIX the shell still expands `$VAR` — and GGC splits it at spaces without honouring quotes, so an argument cannot contain a space. |
 | `url` | For `ua`: the GAS application URL. |
 | `isolate` | Run this suite's tests in isolated processes (in addition to the global `isolate`). |
 | `timeout` | Wall-clock limit for this suite, in seconds; overrides the global `timeout`. |
 
+**Validation.** The config is checked before the scenario server or any
+application starts, and every problem is listed (exit code 2): an unknown key
+— a typo such as `comandLine` would otherwise be silently ignored — a suite
+without a name or reusing another's (suites write reports under their name),
+a suite with both or neither of `module` / `actions`, a `module` (or `.42m`)
+or action file that does not exist, an unknown `mode` or reporter, a `ua`
+suite without a `url`, and a negative `timeout`. Keys starting with `$` or `_`
+are allowed, for `$schema` or comment entries. A discovered suite whose name
+is already taken is skipped with a note.
+
+**Paths.** Every relative path in the config — `outdir`, `jsonRunner`, a suite's
+`module` / `actions` / `workdir`, and `discover.dir` / `discover.workdir` — is
+resolved against the **directory of the config file**, not the current
+directory. A config therefore means the same thing wherever the CLI is started
+from. Absolute paths are used as written.
+
 ### 6.2 Run
 
-Run from the package root with that directory on `FGLLDPATH`
-(`export FGLLDPATH="$(pwd):$FGLLDPATH"`):
+With the package installed (§3.1), from your project root:
+
+```
+fglpkg bdl 4js-fgltest fgltest "$PWD/fgltest.json"
+# or, equivalently:
+fglrun .fglpkg/packages/4js-fgltest/com/fourjs/fgltest/fgltest fgltest.json
+```
+
+`fglpkg bdl` starts programs inside the installed package's directory, so pass
+it the config as an **absolute** path; the paths inside the config are resolved
+against the config file either way.
+
+From a source checkout, run from the package root with that directory on
+`FGLLDPATH` (`export FGLLDPATH="$(pwd):$FGLLDPATH"`):
 
 ```
 fglrun com/fourjs/fgltest/fgltest.42m            # uses ./fgltest.json
@@ -548,8 +646,8 @@ Written to `outdir/`, selected by the `reporters` config (or the
 |------|--------|
 | console | Readable pass/fail with failure detail (always on for direct runs). |
 | `<name>.junit.xml` | JUnit XML — consumable by Jenkins, GitLab, GitHub Actions, … |
-| `<name>.tap` | Test Anything Protocol v13. |
-| `<name>.json` | Structured results (per-test cases and messages). |
+| `<name>.tap` | Test Anything Protocol v13. A test that did not pass carries a YAML block — `severity` (`fail` / `error`), `message` (the first) and `messages` (all) — with quoted values; `#` in a test name is escaped. |
+| `<name>.json` | Structured results (below). |
 | `fgltest.summary.json` | The CLI's merged aggregate across all suites. |
 
 Every format distinguishes three outcomes, because they mean different things to
@@ -558,18 +656,42 @@ whoever reads the dashboard:
 | Outcome | Meaning | JUnit | TAP |
 |---------|---------|-------|-----|
 | **failure** | an assertion did not hold — the app behaved differently than expected | `<failure>` | `not ok` |
-| **error** | the test could not run — a bad field/table/action name, or a lost session | `<error>` | `not ok … # ERROR` |
+| **error** | the test could not run — a bad field/table/action name, a runtime error, a crashed or lost application | `<error>` | `not ok … # ERROR` |
 | **skipped** | deliberately not run (`testSkip` / `"skip"` / not the focused `only`) | `<skipped/>` | `ok … # SKIP` |
 
 JUnit reports carry a per-test `time` and a suite `timestamp`, so CI shows
 durations and trends.
 
-Reports are rewritten **after every test**, so if a run is cut short — the
-application closes, a suite is killed — the results gathered up to that point are
-still on disk.
+**The JSON report** (`<name>.json`):
 
-The process exit code is non-zero if any test failed or errored, or a suite
-produced no results — wire it straight into CI. Skipped tests never fail a build.
+| Field | Meaning |
+|-------|---------|
+| `suite` | The suite name. |
+| `tests` | Number of entries in `cases` (tests, plus a `beforeAll hook` / `afterAll hook` entry when one failed). |
+| `passed` / `failed` / `errors` / `skipped` | Disjoint counts that add up to `tests`: `failed` — a check did not hold; `errors` — the test could not run. |
+| `duration` | Total seconds. |
+| `cases[]` | Per entry: `name`, `passed`, `errored`, `skipped`, `checks`, `failed` (failed checks), `duration`, `messages[]`. |
+
+Reports account for **every test, even when the suite process dies part-way.**
+Before anything runs, each test is on the reports as *not run*; the test in
+progress is marked *did not complete* while it runs; and the reports are
+rewritten around each test. So whatever cuts a run short — an uncaught runtime
+error, the application taking the session down, a kill — the last reports on
+disk hold the results gathered so far, an errored entry naming the test the
+process died in (`did not complete: …`), and an errored entry for each test it
+never reached (`not run: …`).
+
+The CLI also checks that each suite process reached the end: the runner drops a
+`<name>.done` marker when it finishes, and a process that exits without one is
+counted as **incomplete**, even if every test that finished had passed. Before
+each run the CLI deletes that suite's previous reports and marker, so results
+left by an earlier run can never stand in for this one.
+
+The process exit code is non-zero if any test failed or errored, or any suite
+process was incomplete (crashed, killed, or stopped by the watchdog) — wire it
+straight into CI. Skipped tests never fail a build. `fgltest.summary.json`
+carries the counts behind that decision: `tests`, `passed`, `failed`, `errors`,
+`skipped`, `timedOut` and `incomplete`.
 
 ---
 
@@ -578,6 +700,18 @@ produced no results — wire it straight into CI. Skipped tests never fail a bui
 The GGC BDL API is a client to a separate **scenario server**. The `fgltest` CLI
 owns its lifecycle: it starts `ggcadmin startbdlserver` before the run and stops
 it after, even if a suite crashes.
+
+If a server is **already** listening on the port, the CLI uses it, says so, and
+leaves it running: it only stops (or, for a wedged suite, restarts) a server it
+started itself. That keeps it from killing a server you started by hand, but it
+cannot make two runs share one server safely — whichever started it stops it
+when it finishes, cutting off the other. Give **concurrent runs on one machine**
+(CI jobs on a shared runner, say) a port each with `FGLTEST_PORT`, which
+overrides the config's `port`:
+
+```
+FGLTEST_PORT=$((6500 + RUNNER_SLOT)) fglrun …/fgltest fgltest.json
+```
 
 When running a suite or an action file **directly** (not via the CLI), start the
 server yourself first:
@@ -611,11 +745,17 @@ side-by-side in the same `fgltest.json`.
 | Cannot connect / suite hangs at start | The scenario server isn't running. Use the CLI (it manages the server) or start `ggcadmin startbdlserver` yourself. |
 | `ggcadmin` / `ggc.jar` not found | `envggc` wasn't sourced. |
 | Action file: `unknown command '…'` at load | A `command` value isn't in the reference table (§5.1). The file is rejected before the app starts; every problem is listed at once. |
-| Suite reports "no results produced" | The suite process exited before writing its JSON — inspect `outdir/<name>.log`. |
+| Suite reports "no results produced" | The suite process exited before writing its JSON — the module was not found, the app could not start, or the scenario server was unreachable. Inspect `outdir/<name>.log`. |
+| "the suite process ended before completing" | The suite died part-way. Its reports name the test it died in (`did not complete`) and the tests it never reached (`not run`); the log shows the error. A runtime error in your test code can be trapped per test instead — see §4.1. |
 | A test reports `driver error: (GGC-7) … not found` | A field name doesn't exist on the current form. Use `inspect.fieldNames()` to list what is actually there. Only that test errors; the run continues. |
 | A test reports `driver error: (GGC-11) No scrollable widget …` | A table name is wrong. It must be the AUI `<Table name>` (or the screen-record name) — **not** the `.per` `TABLE` widget tag. `inspect.tables()` lists the valid names. |
 | A test reports `driver error: (GGC-9) The action … does not belong` | An action name doesn't exist in the active dialog. `inspect.actionNames()` lists them. |
-| Every test after some point is "not run: the application under test ended" | The app exited mid-run (often an `afterEach`/`afterAll` that closes it, or a crash). Reports still contain everything up to that point. |
+| A test errors with `GGC-12 The scenario has already ended`, the rest are "not run: the application under test ended" | The app exited mid-run (often an `afterEach` that closes it, or a test that ends the program before a later test expects it). Reports still contain everything up to that point. |
+| A test errors with "the application under test stopped with a runtime error: Program stopped at …" | The application crashed during that test; the message is the runtime's own, with file and line. The remaining tests are not run. |
+| A test passes, then the next ones fail with nothing obviously wrong | The application may have crashed with `gui.programStoppedMessage` set in its FGLPROFILE, which hides the error text the runner looks for. In `tcp` mode the suite log captures the application's own error output. |
+| Every test is "not run: the beforeAll hook failed" | See the `beforeAll hook` entry in the same report for what went wrong. |
+| "using the scenario server already running on port …" | Something was already listening on the port — your own server, or another run. It is reused and left running. For concurrent runs, set `FGLTEST_PORT` per run (§8). |
+| `fglpkg bdl … fgltest fgltest.json` says `cannot read config` | `fglpkg bdl` runs programs inside the installed package; pass the config as an absolute path (`"$PWD/fgltest.json"`). |
 | Run never finishes | A wedged application. Set `timeout` (§6.5); the CLI's own CI job timeout remains the ultimate backstop. |
 
 ---
@@ -638,4 +778,5 @@ Library modules: `driver` / `ggcdriver` (the GGC seam), `core` (shared state and
 results), `inspect` (AUI introspection), `flow` (interaction verbs), `expect`
 (matchers), `script` (JSON action-file loader + dispatcher), `runner`
 (orchestration), `reporters` (JUnit/TAP/JSON), `server` (scenario-server
-lifecycle).
+lifecycle), `cli` (the CLI's config model and result handling — used by the
+`fgltest` program, not by suites).

@@ -25,8 +25,8 @@ PKGDIR  := com/fourjs/fgltest
 export FGLLDPATH := $(CURDIR):$(CURDIR)/tests$(if $(FGLLDPATH),:$(FGLLDPATH))
 
 # Library modules in dependency order (IMPORT FGL needs deps compiled first).
-# script imports flow/expect/inspect; runner imports script.
-LIBMODS := driver core ggcdriver inspect flow expect script reporters server runner
+# script imports flow/expect/inspect; cli imports server; runner imports script.
+LIBMODS := driver core ggcdriver inspect flow expect script reporters server cli runner
 # MAIN programs (compiled after the library they import).
 PROGS   := fgltest fgltest_json
 
@@ -54,12 +54,14 @@ example: lib
 	  && $(FGLCOMP) -M price.4gl \
 	  && $(FGLCOMP) -M price_test.4gl
 
-# Build fgltest's own test suite. Both are modules without a PACKAGE line, and
+# Build fgltest's own test suite. These are modules without a PACKAGE line, and
 # for those `fglcomp -M` writes the .42m to the CWD rather than beside the
-# source — so both need --output-dir to land in tests/ (same reason the two
-# runner programs use it).
+# source — so each needs --output-dir to land in tests/ (same reason the two
+# runner programs use it). runnersuite is a helper program selftest runs as a
+# subprocess.
 tests: lib
 	$(FGLCOMP) -M --output-dir $(TESTDIR) $(TESTDIR)/fakedriver.4gl
+	$(FGLCOMP) -M --output-dir $(TESTDIR) $(TESTDIR)/runnersuite.4gl
 	$(FGLCOMP) -M --output-dir $(TESTDIR) $(TESTDIR)/selftest.4gl
 
 # Run fgltest's own tests. Needs NO GGC engine, NO scenario server and NO

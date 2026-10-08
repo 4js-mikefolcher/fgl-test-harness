@@ -54,7 +54,12 @@ PRIVATE FUNCTION check(op STRING, target STRING)
     END IF
     CALL core.setDriverError(SFMT("(GGC-%1) %2 [%3 '%4']",
         ggc.statusCode, ggc.statusMsg, op, target))
-    IF ggc.statusCode == ggc.CLOSED OR ggc.statusCode == ggc.PREMATURE_SCENARIO_END THEN
+    # The application can no longer be driven: the program has ended
+    # (ILLEGAL_STATE: "the scenario has already ended"), or the session is gone.
+    # No later test can run, so the runner stops scheduling.
+    IF ggc.statusCode == ggc.ILLEGAL_STATE
+        OR ggc.statusCode == ggc.CLOSED
+        OR ggc.statusCode == ggc.PREMATURE_SCENARIO_END THEN
         CALL core.setFatal()
     END IF
     LET ggc.statusCode = ggc.SUCCESS

@@ -7,8 +7,8 @@
   "repository": "https://github.com/4js-mikefolcher/fgl-test-harness",
   "license": "Apache-2.0",
   "keywords": ["testing", "functional-tests", "ggc", "aui", "junit", "tap", "genero"],
-  "genero": ">=6.0.0",
+  "genero": "^6.0.0",
   "root": "com/fourjs/fgltest",
   "programs": ["fgltest", "fgltest_json"],
-  "docs": ["README.md", "USERGUIDE.md", "CHANGELOG.md"]
+  "docs": ["README.md", "USERGUIDE.md", "CHANGELOG.md", "schema/action-file.schema.json"]
 }

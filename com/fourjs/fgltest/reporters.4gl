@@ -99,10 +99,16 @@ END FUNCTION
 # ----------------------------------------------------------------- TAP ----
 
 #+ Test Anything Protocol v13.
+#+
+#+ A test that did not pass carries a YAML diagnostic block: `severity` (fail or
+#+ error), `message` (the first message, for consumers that read only that)
+#+ and `messages` (all of them). Every value is a double-quoted YAML string, so
+#+ a message holding `:`, `#` or quotes cannot break the block; a `#` or `\` in a
+#+ test name is escaped, as TAP requires, so it is not read as a directive.
 PUBLIC FUNCTION toTAP(outcomes core.OutcomeList) RETURNS STRING
     DEFINE b base.StringBuffer
     DEFINE i, k INTEGER
-    DEFINE nl STRING
+    DEFINE nl, name STRING
 
     LET nl = ASCII 10
     LET b = base.StringBuffer.create()
@@ -112,16 +118,17 @@ PUBLIC FUNCTION toTAP(outcomes core.OutcomeList) RETURNS STRING
     CALL b.append(nl)
 
     FOR i = 1 TO outcomes.getLength()
+        LET name = tapDescription(outcomes[i].name)
         IF core.isTrue(outcomes[i].skipped) THEN
-            CALL b.append(SFMT("ok %1 - %2 # SKIP", i, outcomes[i].name))
+            CALL b.append(SFMT("ok %1 - %2 # SKIP", i, name))
         ELSE
             IF core.isTrue(outcomes[i].passed) THEN
-                CALL b.append(SFMT("ok %1 - %2", i, outcomes[i].name))
+                CALL b.append(SFMT("ok %1 - %2", i, name))
             ELSE
                 IF core.isTrue(outcomes[i].errored) THEN
-                    CALL b.append(SFMT("not ok %1 - %2 # ERROR", i, outcomes[i].name))
+                    CALL b.append(SFMT("not ok %1 - %2 # ERROR", i, name))
                 ELSE
-                    CALL b.append(SFMT("not ok %1 - %2", i, outcomes[i].name))
+                    CALL b.append(SFMT("not ok %1 - %2", i, name))
                 END IF
             END IF
         END IF
@@ -129,10 +136,24 @@ PUBLIC FUNCTION toTAP(outcomes core.OutcomeList) RETURNS STRING
         IF NOT core.isTrue(outcomes[i].passed) AND NOT core.isTrue(outcomes[i].skipped) THEN
             CALL b.append("  ---")
             CALL b.append(nl)
-            FOR k = 1 TO outcomes[i].messages.getLength()
-                CALL b.append(SFMT("  message: %1", outcomes[i].messages[k]))
+            IF core.isTrue(outcomes[i].errored) THEN
+                CALL b.append("  severity: error")
+            ELSE
+                CALL b.append("  severity: fail")
+            END IF
+            CALL b.append(nl)
+            IF outcomes[i].messages.getLength() > 0 THEN
+                CALL b.append("  message: ")
+                CALL b.append(yamlString(outcomes[i].messages[1]))
                 CALL b.append(nl)
-            END FOR
+                CALL b.append("  messages:")
+                CALL b.append(nl)
+                FOR k = 1 TO outcomes[i].messages.getLength()
+                    CALL b.append("    - ")
+                    CALL b.append(yamlString(outcomes[i].messages[k]))
+                    CALL b.append(nl)
+                END FOR
+            END IF
             CALL b.append("  ...")
             CALL b.append(nl)
         END IF
@@ -153,7 +174,9 @@ PRIVATE TYPE JsonReport RECORD
     cases core.OutcomeList
 END RECORD
 
-#+ Structured JSON report.
+#+ Structured JSON report: the suite name, the counts — tests, passed, failed
+#+ (a check did not hold), errors (could not run), skipped; disjoint, so they
+#+ add up to tests — the total duration, and the per-test cases.
 PUBLIC FUNCTION toJSON(outcomes core.OutcomeList, suiteName STRING) RETURNS STRING
     DEFINE rep JsonReport
     DEFINE i INTEGER
@@ -165,12 +188,15 @@ PUBLIC FUNCTION toJSON(outcomes core.OutcomeList, suiteName STRING) RETURNS STRI
         IF core.isTrue(outcomes[i].skipped) THEN
             LET rep.skipped = rep.skipped + 1
         ELSE
+            # passed, failed and errors are disjoint, like JUnit's counts:
+            # failed = a check did not hold, errors = could not run.
             IF core.isTrue(outcomes[i].passed) THEN
                 LET rep.passed = rep.passed + 1
             ELSE
-                LET rep.failed = rep.failed + 1
                 IF core.isTrue(outcomes[i].errored) THEN
                     LET rep.errors = rep.errors + 1
+                ELSE
+                    LET rep.failed = rep.failed + 1
                 END IF
             END IF
         END IF
@@ -230,6 +256,50 @@ PRIVATE FUNCTION isoNow() RETURNS STRING
     LET dt = CURRENT YEAR TO SECOND
     LET s = dt
     RETURN SFMT("%1T%2", s.subString(1, 10), s.subString(12, 19))
+END FUNCTION
+
+# A TAP test description: on one line, with "\" and "#" escaped so the name
+# cannot be read as a directive.
+PRIVATE FUNCTION tapDescription(s STRING) RETURNS STRING
+    DEFINE b base.StringBuffer
+    LET b = base.StringBuffer.create()
+    CALL b.append(s)
+    CALL b.replace("\\", "\\\\", 0)
+    CALL b.replace("#", "\\#", 0)
+    CALL b.replace(ASCII 13, " ", 0)
+    CALL b.replace(ASCII 10, " ", 0)
+    RETURN b.toString()
+END FUNCTION
+
+# A double-quoted YAML scalar: backslash, quote and line breaks escaped, other
+# control characters dropped.
+PRIVATE FUNCTION yamlString(s STRING) RETURNS STRING
+    DEFINE b base.StringBuffer
+    DEFINE i INTEGER
+    DEFINE c STRING
+    LET b = base.StringBuffer.create()
+    CALL b.append('"')
+    FOR i = 1 TO s.getLength()
+        LET c = s.getCharAt(i)
+        CASE
+            WHEN c == "\\"
+                CALL b.append("\\\\")
+            WHEN c == '"'
+                CALL b.append('\\"')
+            WHEN c == ASCII 10
+                CALL b.append("\\n")
+            WHEN c == ASCII 9
+                CALL b.append("\\t")
+            WHEN c == ASCII 13
+                CALL b.append("\\r")
+            WHEN ORD(c) < 32
+                -- other control characters have no place in a message
+            OTHERWISE
+                CALL b.append(c)
+        END CASE
+    END FOR
+    CALL b.append('"')
+    RETURN b.toString()
 END FUNCTION
 
 #+ Escape a string for XML text/attribute content.

@@ -4,6 +4,7 @@
 PACKAGE com.fourjs.fgltest
 
 IMPORT util
+IMPORT os
 IMPORT FGL com.fourjs.fgltest.driver
 
 #+ Package version. Keep in step with fglpkg.json and CHANGELOG.md.
@@ -87,6 +88,64 @@ PUBLIC FUNCTION nowSeconds() RETURNS FLOAT
     RETURN util.Datetime.toSecondsSinceEpoch(util.Datetime.getCurrentAsUTC())
 END FUNCTION
 
+# --------------------------------------------------------------- shell ----
+
+#+ `s` as one double-quoted argument for a command run with RUN, quoted by the
+#+ rules of sh on POSIX systems and of the C runtime's argument parser on
+#+ Windows, so a value holding quotes, backslashes or spaces arrives intact. On
+#+ POSIX, `$VAR` still expands, as in any double-quoted shell argument.
+PUBLIC FUNCTION shellArg(s STRING) RETURNS STRING
+    RETURN quoteArg(s, os.Path.separator() == "\\")
+END FUNCTION
+
+#+ shellArg() for a given platform (windows = TRUE for the Windows rules).
+PUBLIC FUNCTION quoteArg(s STRING, windows BOOLEAN) RETURNS STRING
+    DEFINE b base.StringBuffer
+    DEFINE i, k, slashes INTEGER
+    DEFINE c STRING
+
+    LET b = base.StringBuffer.create()
+    CALL b.append('"')
+    IF isTrue(windows) THEN
+        # Backslashes are literal unless they precede a quote: then each one
+        # is doubled and the quote escaped. Trailing ones are doubled so they
+        # cannot escape the closing quote.
+        LET slashes = 0
+        FOR i = 1 TO s.getLength()
+            LET c = s.getCharAt(i)
+            IF c == "\\" THEN
+                LET slashes = slashes + 1
+                CONTINUE FOR
+            END IF
+            IF c == '"' THEN
+                FOR k = 1 TO slashes * 2 + 1
+                    CALL b.append("\\")
+                END FOR
+            ELSE
+                FOR k = 1 TO slashes
+                    CALL b.append("\\")
+                END FOR
+            END IF
+            LET slashes = 0
+            CALL b.append(c)
+        END FOR
+        FOR k = 1 TO slashes * 2
+            CALL b.append("\\")
+        END FOR
+    ELSE
+        # Inside double quotes sh gives \ and " meaning: escape both.
+        FOR i = 1 TO s.getLength()
+            LET c = s.getCharAt(i)
+            IF c == "\\" OR c == '"' THEN
+                CALL b.append("\\")
+            END IF
+            CALL b.append(c)
+        END FOR
+    END IF
+    CALL b.append('"')
+    RETURN b.toString()
+END FUNCTION
+
 # ------------------------------------------------------- driver errors ----
 
 #+ Record a driver error for the current test. The FIRST error is kept (it is
@@ -122,6 +181,11 @@ END FUNCTION
 #+ TRUE once the session is unrecoverable; the runner stops scheduling tests.
 PUBLIC FUNCTION isFatal() RETURNS BOOLEAN
     RETURN g_fatal
+END FUNCTION
+
+#+ Forget an unrecoverable session (a fresh run starts with a live one).
+PUBLIC FUNCTION clearFatal()
+    LET g_fatal = FALSE
 END FUNCTION
 
 # ------------------------------------------------------ assertion results ----

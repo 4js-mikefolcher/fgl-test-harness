@@ -2,6 +2,9 @@
 #
 # Answers live-state questions straight from the AUI tree / driver: what actions
 # exist and are active, what fields exist and are enabled/visible/editable.
+# Fields and tables are read from the CURRENT window only: the AUI tree keeps
+# every open window, so with a modal child window up, a whole-tree query would
+# also report the parent's fields.
 # Fields live under two AUI tags — TableColumn (list columns) and FormField
 # (standalone) — so fields() unions both. Enable/visibility semantics:
 #   active : absent or "1" = enabled, "0" = disabled
@@ -91,7 +94,8 @@ END FUNCTION
 
 # ----------------------------------------------------------------- fields ----
 
-#+ All fields on the current form — union of FormField and TableColumn nodes.
+#+ All fields on the current window's form — union of FormField and
+#+ TableColumn nodes.
 PUBLIC FUNCTION fields() RETURNS FieldList
     DEFINE d driver.Driver
     DEFINE doc xml.DomDocument
@@ -102,7 +106,7 @@ PUBLIC FUNCTION fields() RETURNS FieldList
     DEFINE i, n INTEGER
 
     LET d = core.getDriver()
-    LET doc = d.auiTree()
+    LET doc = d.auiPart(driver.CURRENT_WINDOW)
     IF doc IS NULL THEN
         RETURN r
     END IF
@@ -172,8 +176,8 @@ END FUNCTION
 
 # ----------------------------------------------------------------- tables ----
 
-#+ Names of all tables/matrices on the current form (the AUI Table `name`
-#+ attribute — this is the identifier the table queries/verbs expect).
+#+ Names of all tables/matrices on the current window's form (the AUI Table
+#+ `name` attribute — this is the identifier the table queries/verbs expect).
 PUBLIC FUNCTION tables() RETURNS StringList
     DEFINE d driver.Driver
     DEFINE doc xml.DomDocument
@@ -182,7 +186,7 @@ PUBLIC FUNCTION tables() RETURNS StringList
     DEFINE i INTEGER
 
     LET d = core.getDriver()
-    LET doc = d.auiTree()
+    LET doc = d.auiPart(driver.CURRENT_WINDOW)
     IF doc IS NULL THEN
         RETURN r
     END IF
@@ -220,6 +224,46 @@ PUBLIC FUNCTION currentCellValue(tableName STRING, columnName STRING) RETURNS ST
     DEFINE d driver.Driver
     LET d = core.getDriver()
     RETURN d.cellValue(tableName, columnName, d.currentRow(tableName))
+END FUNCTION
+
+# ------------------------------------------------------------ application ----
+
+#+ The runtime error the application under test stopped with, or NULL.
+#+
+#+ When a Genero program stops on a runtime error in GUI mode, the runtime
+#+ shows the message in a "winmsg" message box and waits for it to be
+#+ acknowledged. Meanwhile GGC keeps answering from the screen it last saw, so
+#+ the application looks alive — reads still succeed and assertions may pass.
+#+ This finds that box by its text ("Program stopped at ..."). A program that
+#+ sets gui.programStoppedMessage in FGLPROFILE replaces that text, and then
+#+ the box cannot be told apart from the application's own message boxes.
+PUBLIC FUNCTION applicationError() RETURNS STRING
+    DEFINE d driver.Driver
+    DEFINE doc xml.DomDocument
+    DEFINE nl xml.DomNodeList
+    DEFINE msg STRING
+    DEFINE b base.StringBuffer
+    DEFINE i INTEGER
+
+    LET d = core.getDriver()
+    LET doc = d.auiTree()
+    IF doc IS NULL THEN
+        RETURN NULL
+    END IF
+    LET nl = doc.selectByXPath("//Menu[@style='winmsg']", NULL)
+    FOR i = 1 TO nl.getCount()
+        LET msg = nl.getItem(i).getAttribute("comment")
+        IF msg.getIndexOf("Program stopped at", 1) > 0 THEN
+            # One line: the message spans several, ending with a newline.
+            LET b = base.StringBuffer.create()
+            CALL b.append(msg)
+            CALL b.replace(ASCII 13, "", 0)
+            CALL b.replace(ASCII 10, " ", 0)
+            LET msg = b.toString()
+            RETURN msg.trim()
+        END IF
+    END FOR
+    RETURN NULL
 END FUNCTION
 
 # ---------------------------------------------------------------- helpers ----

@@ -25,9 +25,34 @@ the package **`com.fourjs.fgltest`**. For a step-by-step walkthrough see
   (`$FGLDIR/testing_utilities/ggc`): source its `envggc` so `ggc.jar` is on
   `CLASSPATH`, `ggc.42m` is on `FGLLDPATH`, and `ggcadmin` is on `PATH`.
 - A Java runtime for the GGC engine.
-- GNU `make`.
+- GNU `make` (only to build from source).
 
-## Build
+## Install
+
+Add fgltest to your project with the Genero package manager — as a dev
+dependency, since only your tests use it:
+
+```
+fglpkg install --save-dev 4js-fgltest
+eval "$(fglpkg env)"                         # puts the package on FGLLDPATH
+. "$FGLDIR/testing_utilities/ggc/envggc"     # the GGC engine, ggcadmin, ggc.42m
+```
+
+`IMPORT FGL com.fourjs.fgltest.*` then resolves, so your suites compile with a
+plain `fglcomp -M`. Run the CLI either through fglpkg or directly from your
+project root:
+
+```
+fglpkg bdl 4js-fgltest fgltest "$PWD/fgltest.json"
+fglrun .fglpkg/packages/4js-fgltest/com/fourjs/fgltest/fgltest fgltest.json
+```
+
+Give `fglpkg bdl` an **absolute** config path: it starts programs inside the
+installed package's directory, so a bare `fgltest.json` would be looked for
+there. The paths *inside* the config are resolved against the config file's
+own directory, so the config works the same either way.
+
+## Build from source
 
 ```
 make          # builds com/fourjs/fgltest/*.42m (library + the fgltest and
@@ -134,9 +159,15 @@ Rows are 1-based. A cell read only sees a **loaded** row, so `assertCell` target
 the **current** row (always loaded) while `assertCellAtRow` navigates to `row`
 first — use it, or a `selectRow` step, to reach a non-visible row.
 
-An unknown command fails the test (never silently passes). Complex tests
-(loops, computed data, DB setup) still use the compiled BDL API above — both
-modes share the same engine, hooks, reporters, and CI exit code.
+An action file is validated when it loads, before any application starts,
+and every problem is reported at once: an unknown command, a missing
+`target` / `value` / `column` / `row`, a count or delay that is not a whole
+number, or two tests with the same name (names identify tests in the reports).
+The package ships a JSON Schema with the same rules,
+`schema/action-file.schema.json`, for editor validation and completion.
+
+Complex tests (loops, computed data, DB setup) still use the compiled BDL API
+above — both modes share the same engine, hooks, reporters, and CI exit code.
 
 ## Configure and run
 
@@ -171,7 +202,27 @@ either a compiled `module` **or** a JSON `actions` file:
   GAS-deployed app via `url`.
 - `module` vs `actions` — a suite uses one: `module` runs a compiled suite;
   `actions` runs a JSON action file via the generic runner (overridable with the
-  top-level `jsonRunner`, default `com/fourjs/fgltest/fgltest_json`).
+  top-level `jsonRunner`; by default the `fgltest_json` program that sits beside
+  the CLI).
+- Relative paths (`outdir`, `module`, `actions`, `workdir`, `jsonRunner`,
+  `discover.dir`, `discover.workdir`) resolve against the **config file's
+  directory**, not the current one. `outdir` defaults to that directory.
+- The config is **validated before anything runs**: an unknown key (a typo like
+  `comandLine` would otherwise be ignored), a suite without a name or reusing
+  another's, a missing `module` / `actions` file, an unknown `mode` or reporter,
+  a `ua` suite without a `url`. Every problem is listed, and the CLI exits 2.
+  Keys starting with `$` or `_` are allowed, for `$schema` or comments.
+- `workdir` defaults to the config's directory; `commandLine` defaults to
+  GGC's `fglrun <application>`. The command line reaches GGC exactly as
+  written (on POSIX the shell still expands `$VAR`), and **GGC splits it at
+  spaces without honouring quotes**, so an argument cannot contain a space.
+- `port` (default `6500`) is the scenario-server port; the CLI starts the server
+  on it and passes it to every suite. The `FGLTEST_PORT` environment variable
+  overrides it. If a server is already listening on the port, the CLI uses it
+  and leaves it running; it only stops a server it started itself. **Concurrent
+  runs on one machine** (CI jobs on a shared runner) should each use their own
+  port, e.g. `FGLTEST_PORT=$((6500 + N))`: one run stopping its server would
+  otherwise cut off the other's sessions.
 
 **Isolate — a process per test.** By default a suite's tests share one engine
 session (fast). Set `"isolate": true` (top-level, or per-suite) to run each test
@@ -199,7 +250,8 @@ suites, all sharing one connection template:
 Discovered suites are appended to any explicit `suites[]`. (All discovered suites
 share the one template, so use it for a directory of tests against the same app.)
 
-Run all suites (from the package root, with that directory on `FGLLDPATH`):
+Run all suites. With the package installed, see [Install](#install); from a
+source checkout, from the package root with that directory on `FGLLDPATH`:
 
 ```
 export FGLLDPATH="$(pwd):$FGLLDPATH"
@@ -209,7 +261,8 @@ fglrun com/fourjs/fgltest/fgltest.42m my.json    # explicit config
 
 The CLI starts the GGC scenario server, runs each suite, merges results, writes
 reports to `outdir/`, prints an aggregate summary, and exits non-zero if any test
-failed. Per-suite console output (and raw engine logs) go to `outdir/<name>.log`.
+failed or errored, or any suite process ended before completing. Per-suite
+console output (and raw engine logs) go to `outdir/<name>.log`.
 
 Run a single suite directly (server must already be running via
 `ggcadmin startbdlserver -p 6500`):
@@ -235,12 +288,22 @@ direct run), written to `outdir/`:
 - `<name>.junit.xml` — JUnit XML for CI (Jenkins, GitLab, GitHub Actions, …), with
   per-test `time`, a suite `timestamp`, `<skipped/>`, and `<error>` (a test that
   could not run) reported separately from `<failure>` (an assertion that did not hold).
-- `<name>.tap` — Test Anything Protocol v13, with `# SKIP` / `# ERROR` directives.
-- `<name>.json` — structured results, including `errors`, `skipped` and durations.
+- `<name>.tap` — Test Anything Protocol v13, with `# SKIP` / `# ERROR` directives
+  and, for a test that did not pass, a YAML block (`severity`, `message`,
+  `messages`) whose values are quoted, so any message parses.
+- `<name>.json` — structured results: `tests`, `passed`, `failed`, `errors`,
+  `skipped` (disjoint counts, as in JUnit: `failed` is a check that did not
+  hold, `errors` a test that could not run), durations and the per-test cases.
 - `fgltest.summary.json` — the CLI's merged aggregate.
 
-Reports are written **after every test**, so a run cut short by a crashing or
-closing application still leaves the results gathered so far on disk.
+Reports account for **every test, even when the suite process dies part-way**.
+Each test is on the reports before anything runs (as not run), the test in
+progress is marked "did not complete" while it runs, and the reports are
+rewritten around each test. If the process is cut short, the last reports on
+disk show the results gathered so far, name the test it died in, and list every
+test it never reached. The CLI separately checks that each suite process reached
+the end (the runner's `<name>.done` marker), so a crash fails the run even if
+every test that finished had passed.
 
 ## API
 
@@ -250,10 +313,10 @@ name shown below.
 
 | Module | Purpose | Highlights |
 |--------|---------|-----------|
-| `runner` | test model + orchestration | `setApplication`, `test`, `testSkip`, `testOnly`, `beforeAll/afterAll/beforeEach/afterEach`, `run` |
+| `runner` | test model + orchestration | `setApplication`, `test`, `testSkip`, `testOnly`, `beforeAll/afterAll/beforeEach/afterEach`, `run`, `runWith` (any `Driver`, no GGC) |
 | `flow` | interaction verbs | `field`, `enter`, `fill`, `clear`, `action`, `press`, `pause`, `selectRow`, `focusCell` |
 | `expect` | assertions | **strings** `expect.that(v).toEqual/notToEqual/toBeEmpty/notToBeEmpty/toContainText/notToContainText/toStartWith/toEndWith/toMatch/notToMatch`<br>**numbers** `expect.num(n).toEqual/notToEqual/toBeGreaterThan/toBeLessThan/toBeAtLeast/toBeAtMost/toBeBetween`<br>**booleans** `expect.bool(b).toBeTrue/toBeFalse`<br>**collections** `expect.all(list).toContain/notToContain/toContainMatch/toHaveSize/toBeEmpty/notToBeEmpty` |
-| `inspect` | AUI introspection | `actions`, `activeActionNames`, `actionNames`, `hasAction`, `fields`, `fieldNames`, `enabledFields`, `editableFields`, `formName`, `windowName`, `tables`, `rowCount`, `currentRow`, `cellValue`, `currentCellValue` |
+| `inspect` | AUI introspection (fields and tables of the current window) | `actions`, `activeActionNames`, `actionNames`, `hasAction`, `fields`, `fieldNames`, `enabledFields`, `editableFields`, `formName`, `windowName`, `tables`, `rowCount`, `currentRow`, `cellValue`, `currentCellValue`, `applicationError` |
 | `script` | declarative JSON tests | `load` (parses **and validates**), `exec` (command dispatcher over `flow`/`expect`/`inspect`); backs the `fgltest_json` runner |
 | `driver` | interaction seam | `Driver` INTERFACE (default impl `ggcdriver`); a jar-backed driver can be added without touching suites |
 
@@ -293,9 +356,57 @@ Once a test has errored, the rest of *that* test is skipped: its remaining verbs
 and matchers short-circuit, so you get the one root cause rather than a cascade
 of consequences. State is reset for the next test.
 
-The one unrecoverable case is the application under test going away
-(`GGC-17 CLOSED`). The runner then stops scheduling, marks the remaining tests
-as not-run, and still writes the reports.
+**Runtime errors in a test.** If a compiled suite's test or hook hits a BDL
+runtime error (a NULL object, a file that will not open, …), the runner can trap
+it and error just that test — but only if the module the error comes from opts
+in, because a `WHENEVER` directive never crosses module boundaries. Put this in
+each suite module, in a function placed **above** your test functions:
+
+```4gl
+FUNCTION optInToRaise()      -- never needs to be called: WHENEVER is
+    WHENEVER ANY ERROR RAISE -- a compile-time directive for the lines below
+END FUNCTION
+```
+
+The test is then reported as `runtime error -8083: Null pointer exception.`, its
+`afterEach` hooks still run, and the suite carries on. (Conversion errors in
+those functions are raised too, rather than silently yielding NULL.) Without the
+opt-in, BDL stops the program on the spot; the reports then mark that test as
+"did not complete" and the rest as "not run", and the CLI fails the run.
+
+**The application going away.** When the application under test ends
+mid-run, the test that hits it errors (`GGC-12 The scenario has already ended`)
+and the remaining tests are reported as `not run: the application under test
+ended` rather than each failing in turn. A loss that ends the suite process
+from inside GGC itself (a closed connection) is accounted for by the reports
+and the CLI's completion check, as described in [Reports](#reports).
+
+**The application crashing.** A Genero program that stops on a runtime error
+shows the error in a message box and waits — and meanwhile GGC keeps answering
+from the screen it last saw, so reads still succeed and assertions can still
+pass. After every test (and every `beforeAll` / `afterAll` phase) the runner
+therefore looks for the runtime's error box, and when it finds one it errors
+that test with the application's own message, then stops the run:
+
+```
+  ERROR 2 - saves the order (could not run to completion)
+         - the application under test stopped with a runtime error: Program stopped at 'orders.4gl', line number 212. FORMS statement error number -8083. Null pointer exception.
+```
+
+The box is recognised by its standard text (`Program stopped at …`). If the
+application sets `gui.programStoppedMessage` in FGLPROFILE, that text is
+replaced and the crash cannot be told from an ordinary message box; it then
+surfaces as a failure in a later test, and the suite log (`outdir/<name>.log`)
+holds the application's own error output in `tcp` mode.
+
+**Hooks.** A `beforeAll` hook that fails (a check that does not hold, a driver
+error, a trapped runtime error) gets its own `beforeAll hook` entry in the
+reports, and the tests are reported `not run: the beforeAll hook failed`
+instead of running on a broken setup. `afterAll` still runs, and an `afterAll`
+that fails gets an `afterAll hook` entry. Hook entries appear only when a hook
+fails. Once the application has ended, an `afterAll` hook's interactions with
+it are expected to fail and are not held against it, so a last test that
+closes the application is fine.
 
 ## Timeouts
 

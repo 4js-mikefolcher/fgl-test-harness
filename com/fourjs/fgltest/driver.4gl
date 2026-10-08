@@ -13,6 +13,11 @@ IMPORT xml
 #+ Named list type (method return values cannot be anonymous types).
 PUBLIC TYPE ActionList DYNAMIC ARRAY OF ggc.Action
 
+#+ auiPart() selector for the current window: the Window node the active dialog
+#+ runs in, with its form and dialog. Equal to
+#+ ggc.WindowSelector(ggc.AUI_CURRENT_SELECTOR); a Driver must accept it.
+PUBLIC CONSTANT CURRENT_WINDOW = "$Window:!current!$"
+
 #+ Low-level interaction seam implemented by concrete drivers.
 PUBLIC TYPE Driver INTERFACE
     -- interaction

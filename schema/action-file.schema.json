@@ -143,7 +143,7 @@
         },
         "value": {
           "type": "string",
-          "description": "The expected value, or the argument for an interaction verb."
+          "description": "The expected value, or the argument for an interaction verb. Counts, row numbers and pause delays are whole numbers written as strings, e.g. \"5\"."
         }
       },
       "allOf": [
@@ -236,6 +236,81 @@
             "required": [
               "value"
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "assertCell",
+                  "assertCellAtRow",
+                  "assertCellContains",
+                  "assertCellMatches",
+                  "focusCell"
+                ]
+              }
+            },
+            "required": [
+              "command"
+            ]
+          },
+          "then": {
+            "required": [
+              "column"
+            ],
+            "properties": {
+              "column": {
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "assertCellAtRow",
+                  "focusCell",
+                  "selectRow"
+                ]
+              }
+            },
+            "required": [
+              "command"
+            ]
+          },
+          "then": {
+            "required": [
+              "row"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "enum": [
+                  "assertCurrentRow",
+                  "assertFieldCount",
+                  "assertRowCount",
+                  "assertRowCountAtLeast",
+                  "assertRowCountAtMost",
+                  "pause"
+                ]
+              }
+            },
+            "required": [
+              "command"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "pattern": "^[0-9]{1,9}$"
+              }
+            }
           }
         }
       ]
