@@ -133,10 +133,10 @@ PRIVATE FUNCTION checkShape(b base.StringBuffer, txt STRING)
         RETURN
     END TRY
     CALL core.checkShape(b, obj, "the file", FILE_SPEC)
-    CALL checkStepShapes(b, obj, "beforeAll", "beforeAll")
-    CALL checkStepShapes(b, obj, "beforeEach", "beforeEach")
-    CALL checkStepShapes(b, obj, "afterEach", "afterEach")
-    CALL checkStepShapes(b, obj, "afterAll", "afterAll")
+    CALL checkStepShapes(b, obj, "beforeAll", "beforeAll", m_file.beforeAll)
+    CALL checkStepShapes(b, obj, "beforeEach", "beforeEach", m_file.beforeEach)
+    CALL checkStepShapes(b, obj, "afterEach", "afterEach", m_file.afterEach)
+    CALL checkStepShapes(b, obj, "afterAll", "afterAll", m_file.afterAll)
     # Check a type before reading through it: assigning an object to the wrong
     # class is a -1260 that TRY/CATCH does not catch.
     LET k = core.jsonKey(obj, "tests")
@@ -152,16 +152,28 @@ PRIVATE FUNCTION checkShape(b base.StringBuffer, txt STRING)
         LET t = arr.get(i)
         LET where = testLabel(t, i)
         CALL core.checkShape(b, t, where, TEST_SPEC)
-        CALL checkStepShapes(b, t, "steps", where)
+        IF i <= m_file.tests.getLength() THEN
+            CALL checkStepShapes(b, t, "steps", where, m_file.tests[i].steps)
+        END IF
     END FOR
 END FUNCTION
 
-# The shape of each step in the list `o` holds under `key` (if it holds one).
-PRIVATE FUNCTION checkStepShapes(b base.StringBuffer, o util.JSONObject, key STRING, where STRING)
+# The shape of each step in the list `o` holds under `key` (if it holds one),
+# and the parsed `steps` they became.
+#
+# A count written as a JSON number is normalised in `steps`: the parser gives
+# a STRING member the number's JSON text, so 5.0 or 1e3 would read "5.0" /
+# "1e3", which isCount() rejects, though the schema (rightly) calls them whole
+# numbers. Only whole-number commands are touched: for assertField, say, the
+# text is compared as written.
+PRIVATE FUNCTION checkStepShapes(b base.StringBuffer, o util.JSONObject, key STRING,
+    where STRING, steps StepList)
     DEFINE arr util.JSONArray
     DEFINE st util.JSONObject
     DEFINE j INTEGER
-    DEFINE k STRING
+    DEFINE k, vk STRING
+    DEFINE f FLOAT
+    DEFINE n BIGINT
 
     LET k = core.jsonKey(o, key)
     IF k IS NULL OR o.getType(k) != "ARRAY" THEN
@@ -172,6 +184,16 @@ PRIVATE FUNCTION checkStepShapes(b base.StringBuffer, o util.JSONObject, key STR
         IF arr.getType(j) == "OBJECT" THEN
             LET st = arr.get(j)
             CALL core.checkShape(b, st, SFMT("%1 step %2", where, j), STEP_SPEC)
+            LET vk = core.jsonKey(st, "value")
+            IF vk IS NOT NULL AND j <= steps.getLength() THEN
+                IF st.getType(vk) == "NUMBER" AND needs(requirements(steps[j].command), "n") THEN
+                    LET f = st.get(vk)
+                    IF core.isWhole(f) THEN
+                        LET n = f
+                        LET steps[j].value = n
+                    END IF
+                END IF
+            END IF
         ELSE
             CALL core.problem(b, SFMT("%1 step %2 must be an object", where, j))
         END IF

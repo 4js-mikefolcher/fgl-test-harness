@@ -83,10 +83,11 @@ values itself — see **Changed**.
   (`"value": "five"` silently became NULL), and an unknown key (`"skipp": true`
   ran the test) used to load cleanly. They are now reported at load with the
   other problems. Keys match without regard to case, as the JSON parser
-  matches them, except `column` / `row` (exact, like the parser). The JSON
-  Schema carries the same rules — test `steps` may not be empty, values may be
-  strings or numbers, `$`/`_` keys are allowed — and a self-test keeps its
-  per-command rules in step with the loader.
+  matches them, except `column` / `row` (exact, like the parser), and values
+  the parser converts cleanly (`"row": "3"`, a count written `5.0`) are
+  accepted. The JSON Schema carries the same rules — test `steps` may not be
+  empty, values may be strings or numbers, `$`/`_` keys are allowed — and a
+  self-test keeps its per-command rules in step with the loader.
 - **A test name used twice no longer runs twice.** Isolate mode selected tests
   by name, so two tests sharing one were each run (and counted) under both
   processes. An action file with a repeated name is now rejected at load; in a
@@ -95,28 +96,33 @@ values itself — see **Changed**.
 - **The TAP diagnostic block is valid YAML.** It repeated a `message:` key per
   message and left values unquoted, so a message with a `:` or `#` broke
   strict consumers. It now has `severity`, `message` and a `messages` list, all
-  quoted, with control characters (DEL included) dropped; a `#` in a test name
-  is escaped so it is not read as a directive.
+  quoted, with control characters (C0, DEL and C1) dropped; a `#` in a test
+  name is escaped so it is not read as a directive.
 - **JUnit reports drop control characters XML forbids.** An ESC or form feed
   in an application's message made the whole report unparseable.
 - **`fgltest.json` mistakes are reported instead of ignored.** A typo'd key was
   dropped silently by the JSON parser (`"comandLine"`: the suite then ran with
-  no command line), and a wrongly typed value became NULL (`"timeout": "30s"`).
-  The config is now checked before anything starts — unknown keys (matched
-  without regard to case, as the parser does), wrongly typed values, suites
+  no command line), and a value it could not convert became NULL
+  (`"timeout": "30s"`). The config is now checked before anything starts —
+  unknown keys (matched without regard to case, as the parser does), values
+  the parser cannot convert cleanly (numeric strings and 0/1 booleans are
+  still fine), suites
   without or reusing a name (their reports overwrote each other), a suite whose
   reports would overwrite the config or an action file (a suite named
-  `fgltest` used to replace `fgltest.json`), reserved names, both or neither of
+  `fgltest` used to replace `fgltest.json`; one called `fglpkg`, the project's
+  `fglpkg.json`), or any report-type file fgltest did not write (deleted
+  even with that reporter off), reserved names, both or neither of
   `module` / `actions`, a missing module or action file, an unknown `mode` or
   reporter, `ua` without a `url`, a negative `timeout` — with every problem
-  listed and exit code 2. A discovered suite whose name is taken, or whose
-  reports would clash, is skipped with a note.
+  listed at once and exit code 2. A discovered suite whose name is taken, or
+  whose reports would clash, is skipped with a note.
 - **Values in suite commands are quoted properly.** The command line, working
   directory, URL and paths were wrapped in `"…"` unescaped: a `commandLine`
   with quotes of its own broke the suite command, and on Windows a `workdir`
   ending in `\` swallowed the closing quote. They are now quoted for the
   platform's shell (`core.shellArg`) and arrive exactly as written — quotes,
-  backslashes, `$`, backticks and non-ASCII text alike. Note that GGC itself
+  backslashes, `$`, backticks and non-ASCII text alike (on Windows, `cmd.exe`
+  still expands `%NAME%` inside quotes). Note that GGC itself
   splits the command line at spaces without honouring quotes, so an
   application argument still cannot contain a space.
 - **`inspect.fields()` and `inspect.tables()` read the current window only.**
@@ -159,10 +165,19 @@ values itself — see **Changed**.
   processing, only error the test that hit them.)
 - **`$NAME` and `${NAME}` in config values are expanded by fgltest**, in paths,
   command lines and URLs, the same way on every platform (`$$` for a literal
-  `$`), and an unset variable is a config error. Before, the POSIX shell
+  `$`; `cmd.exe` on Windows still expands `%NAME%` as well), and an unset
+  variable is a config error. Before, the POSIX shell
   expanded `$VAR` in a `commandLine` (an unset one became empty), not at all on
   Windows, and not in a `module` or `workdir` once they were quoted.
 - A `port` of 0 or below is an error; only an absent `port` defaults to 6500.
+- **Stricter validation rejects some files that ran before.** In
+  `fgltest.json` and in action files, a key fgltest does not know is an error —
+  including harmless extras such as `"description"`; name a comment key with a
+  leading `_` (`"_description"`), which is allowed. An action-file step with a
+  `"row"` below 1 is an error even on a command that takes no row. These ran
+  on 1.0.0 (the extra key was ignored) though the 1.0.0 schema already flagged
+  them; values the JSON parser converts cleanly — `"port": "6752"`,
+  `"isolate": 1`, `"row": "3"`, `"name": 5` — are still accepted.
 - The failure note forwarded to GGC for an errored test gives its cause
   instead of `0/0 checks failed`.
 
@@ -182,7 +197,8 @@ values itself — see **Changed**.
   `core.problem()` — the JSON shape checks both validators use;
   `ggcdriver.sessionOver(code, msg)` — which GGC statuses end the session.
 - `make check` runs the self-tests under both `FGL_LENGTH_SEMANTICS=BYTE` (the
-  default) and `CHAR`.
+  default) and `CHAR`, and fails if no UTF-8 locale is active; CI sets
+  `LANG: C.UTF-8`.
 - `server.ensure(port, idle, timeout)` — starts a scenario server only if none
   is listening, and says whether it did. `driver.CURRENT_WINDOW` — the
   `auiPart()` selector for the current window.

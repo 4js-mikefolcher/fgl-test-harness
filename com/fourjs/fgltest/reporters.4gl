@@ -272,7 +272,8 @@ PRIVATE FUNCTION tapDescription(s STRING) RETURNS STRING
 END FUNCTION
 
 # A double-quoted YAML scalar: backslash, quote and line breaks escaped, other
-# control characters (DEL included, which YAML forbids too) dropped. Built with
+# control characters dropped — C0, DEL and C1 (U+0080..U+009F but U+0085),
+# none of which YAML allows in a scalar. Built with
 # StringBuffer.replace(), which leaves multibyte text intact under either
 # FGL_LENGTH_SEMANTICS; a getCharAt() walk would split it under BYTE.
 PRIVATE FUNCTION yamlString(s STRING) RETURNS STRING
@@ -286,11 +287,27 @@ PRIVATE FUNCTION yamlString(s STRING) RETURNS STRING
     CALL e.replace(ASCII 13, "\\r", 0)
     CALL e.replace(ASCII 9, "\\t", 0)
     CALL dropControls(e)
+    CALL dropC1(e)
     LET r = base.StringBuffer.create()
     CALL r.append('"')
     CALL r.append(e.toString())
     CALL r.append('"')
     RETURN r.toString()
+END FUNCTION
+
+# Remove the C1 control characters U+0080..U+009F except U+0085 (NEL), which
+# YAML forbids; cp1252 text read as Latin-1 turns smart quotes into them. Each
+# is built from its UTF-8 bytes with urlDecode(), so the search string has the
+# same form as the text under either FGL_LENGTH_SEMANTICS. (XML allows them.)
+PRIVATE FUNCTION dropC1(e base.StringBuffer)
+    DEFINE k INTEGER
+    DEFINE hex STRING
+    FOR k = 128 TO 159
+        IF k != 133 THEN
+            LET hex = util.Integer.toHexString(k)
+            CALL e.replace(util.Strings.urlDecode("%C2%" || hex), "", 0)
+        END IF
+    END FOR
 END FUNCTION
 
 # Remove the C0 control characters other than TAB, LF and CR, and DEL: none of

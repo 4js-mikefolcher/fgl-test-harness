@@ -213,12 +213,19 @@ either a compiled `module` **or** a JSON `actions` file:
   "30s"` would otherwise become NULL), a suite without a name or reusing
   another's, a suite whose reports would overwrite the config or an action
   file, a missing `module` / `actions` file, an unknown `mode` or reporter, a
-  `ua` suite without a `url`. Every problem is listed, and the CLI exits 2.
-  Keys starting with `$` or `_` are allowed, for `$schema` or comments.
+  `ua` suite without a `url`. Values the parser converts cleanly (`"60"` for a
+  number, `1` / `0` for a boolean) are accepted, as they always were. Every
+  problem is listed, and the CLI exits 2. Keys starting with `$` or `_` are
+  allowed, for `$schema` or comments (`"_description"`).
+- Files in `outdir` named after a suite are fgltest's: its reports, marker,
+  log and test list are deleted before each run. A report-type file
+  (`.json`, `.junit.xml`, `.tap`, `.done`) that fgltest did not write is
+  protected instead — the run stops with a config error.
 - **Environment variables**: `$NAME` and `${NAME}` in a path, command line or
   URL are expanded by fgltest itself, the same way on every platform (`$$` is a
   literal `$`); a variable that is not set is a config error. Values are then
-  passed to the suite exactly as they are.
+  passed to the suite exactly as they are — except that on Windows `cmd.exe`
+  still expands a `%NAME%` in them, inside quotes or not.
 - `workdir` defaults to the config's directory; `commandLine` defaults to
   GGC's `fglrun <application>`. **GGC splits the command line at spaces without
   honouring quotes**, so an application argument cannot contain a space.
@@ -449,6 +456,10 @@ fgltest has its own test suite:
 ```
 make check
 ```
+
+It runs fgltest's own tests twice, under `FGL_LENGTH_SEMANTICS=BYTE` and
+`CHAR`, and needs a UTF-8 locale (`LANG=C.UTF-8`, say): without one the
+multibyte cases would pass vacuously, so the first check fails instead.
 
 It runs against a **fake driver** — the `Driver` INTERFACE seam means the AUI
 parsing, matchers, reporters and action-file interpreter are all exercised with

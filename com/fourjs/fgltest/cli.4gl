@@ -28,8 +28,12 @@ PRIVATE CONSTANT REPORTERS = "console,junit,tap,json"
 # The files a suite writes into outdir, all named after it.
 PRIVATE CONSTANT RUN_FILE_EXTS = ".json,.junit.xml,.tap,.done,.log,.tests,.list.log"
 
-# The first environment variable normalize() found unset (see expand()).
-PRIVATE DEFINE m_unsetVar STRING
+# The problems normalize() found, one "  - " line each (see expand()).
+PRIVATE DEFINE m_problems base.StringBuffer
+
+# The report types fgltest writes; any other file in outdir that is named
+# after a suite (its log, its test list) is fgltest's own by convention.
+PRIVATE CONSTANT REPORT_EXTS = ".json,.junit.xml,.tap,.done"
 
 PUBLIC TYPE NameList DYNAMIC ARRAY OF STRING
 
@@ -102,7 +106,8 @@ END RECORD
 #+ `$NAME` and `${NAME}` in a path, a command line or a URL are replaced by the
 #+ environment variable's value (see expandEnv), the same way on every
 #+ platform; the shell no longer sees them, since every value is passed on
-#+ quoted literally. A variable that is not set is reported.
+#+ quoted literally (cmd.exe on Windows does still expand `%NAME%`, inside
+#+ quotes or not). A variable that is not set is reported.
 #+
 #+ The FGLTEST_PORT environment variable, when set, overrides "port": concurrent
 #+ runs on one machine (CI jobs on a shared runner) can then each use their own
@@ -111,20 +116,25 @@ END RECORD
 #+ @param cfg        the parsed config, updated in place
 #+ @param cfgPath    path of the config file
 #+ @param programDir directory of the fgltest program (holds the default jsonRunner)
-#+ @return NULL when the config is usable, else what is wrong with it
+#+ It carries on past a problem, so that checkConfig() can list it along with
+#+ every other one: pass the result to checkConfig().
+#+
+#+ @return NULL, or the problems found, one "  - " line each
 PUBLIC FUNCTION normalize(cfg Config INOUT, cfgPath STRING, programDir STRING)
     RETURNS STRING
     DEFINE dir, env, what STRING
     DEFINE i, p INTEGER
 
+    LET m_problems = base.StringBuffer.create()
     LET env = fgl_getenv("FGLTEST_PORT")
     IF LENGTH(env) > 0 THEN
         LET p = env   -- a non-number converts to NULL
         IF p IS NULL OR p <= 0 OR p > server.MAX_PORT THEN
-            RETURN SFMT("FGLTEST_PORT must be a port number (1-%1), not '%2'",
-                server.MAX_PORT, env)
+            CALL core.problem(m_problems, SFMT("FGLTEST_PORT must be a port number (1-%1), not '%2'",
+                server.MAX_PORT, env))
+        ELSE
+            LET cfg.port = p
         END IF
-        LET cfg.port = p
     END IF
     # Only an absent "port" (which parses as NULL, not 0) takes the default:
     # a zero or negative one is a mistake to report, not to paper over.
@@ -132,15 +142,14 @@ PUBLIC FUNCTION normalize(cfg Config INOUT, cfgPath STRING, programDir STRING)
         LET cfg.port = server.DEFAULT_PORT
     END IF
     IF cfg.port <= 0 OR cfg.port > server.MAX_PORT THEN
-        RETURN SFMT("\"port\" must be a port number (1-%1), not %2",
-            server.MAX_PORT, cfg.port)
+        CALL core.problem(m_problems, SFMT("\"port\" must be a port number (1-%1), not %2",
+            server.MAX_PORT, cfg.port))
     END IF
     IF LENGTH(cfg.reporters) == 0 THEN
         LET cfg.reporters = "console,junit,json"
     END IF
     LET cfg.reporters = noSpaces(cfg.reporters)   -- "console, junit" is fine
 
-    LET m_unsetVar = NULL
     LET cfg.outdir = expand(cfg.outdir, "\"outdir\"")
     LET cfg.jsonRunner = expand(cfg.jsonRunner, "\"jsonRunner\"")
     LET cfg.discover.dir = expand(cfg.discover.dir, "\"discover\".dir")
@@ -155,10 +164,6 @@ PUBLIC FUNCTION normalize(cfg Config INOUT, cfgPath STRING, programDir STRING)
         LET cfg.suites[i].commandLine = expand(cfg.suites[i].commandLine, what || " commandLine")
         LET cfg.suites[i].url = expand(cfg.suites[i].url, what || " url")
     END FOR
-    IF m_unsetVar IS NOT NULL THEN
-        RETURN m_unsetVar
-    END IF
-
     LET dir = os.Path.dirName(cfgPath)
     IF LENGTH(cfg.outdir) == 0 THEN
         LET cfg.outdir = "."
@@ -182,15 +187,21 @@ PUBLIC FUNCTION normalize(cfg Config INOUT, cfgPath STRING, programDir STRING)
         LET cfg.suites[i].workdir = resolvePath(dir,
             defaultWorkdir(cfg.suites[i].mode, cfg.suites[i].workdir))
     END FOR
-    RETURN NULL
+    IF m_problems.getLength() == 0 THEN
+        RETURN NULL
+    END IF
+    RETURN m_problems.toString()
 END FUNCTION
 
-# expandEnv() for normalize(): the first unset variable is kept in m_unsetVar.
+# expandEnv() for normalize(). A value naming an unset variable is reported
+# and kept as written, so later messages show it as the user wrote it.
 PRIVATE FUNCTION expand(v STRING, what STRING) RETURNS STRING
     DEFINE r, unset STRING
     CALL expandEnv(v) RETURNING r, unset
-    IF unset IS NOT NULL AND m_unsetVar IS NULL THEN
-        LET m_unsetVar = SFMT("%1 uses the environment variable %2, which is not set", what, unset)
+    IF unset IS NOT NULL THEN
+        CALL core.problem(m_problems,
+            SFMT("%1 uses the environment variable %2, which is not set", what, unset))
+        RETURN v
     END IF
     RETURN r
 END FUNCTION
@@ -335,8 +346,10 @@ END FUNCTION
 #+ @param cfgPath the config file (for the message)
 #+ @param text    the config's JSON text (for the key and type checks)
 #+ @param cfg     the parsed, normalized config
+#+ @param prior   the problems normalize() found (NULL if none), listed first
 #+ @return NULL when the config is valid, else a multi-line description
-PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STRING
+PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config, prior STRING)
+    RETURNS STRING
     DEFINE b base.StringBuffer
     DEFINE obj, o util.JSONObject
     DEFINE arr util.JSONArray
@@ -346,6 +359,7 @@ PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STR
     DEFINE t, where, name, k, clash STRING
 
     LET b = base.StringBuffer.create()
+    CALL b.append(prior)
     TRY
         LET obj = util.JSONObject.parse(text)
     CATCH
@@ -384,7 +398,7 @@ PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STR
     END IF
 
     IF LENGTH(cfg.discover.dir) > 0 THEN
-        IF NOT os.Path.isDirectory(cfg.discover.dir) THEN
+        IF NOT hasDollar(cfg.discover.dir) AND NOT os.Path.isDirectory(cfg.discover.dir) THEN
             CALL core.problem(b, SFMT("\"discover\": directory '%1' not found", cfg.discover.dir))
         END IF
         CALL checkConnection(b, "\"discover\"", cfg.discover.mode, cfg.discover.url)
@@ -414,14 +428,15 @@ PUBLIC FUNCTION checkConfig(cfgPath STRING, text STRING, cfg Config) RETURNS STR
         IF LENGTH(cfg.suites[i].module) == 0 AND NOT isActionSuite(cfg.suites[i]) THEN
             CALL core.problem(b, SFMT("%1 needs a \"module\" or an \"actions\" file", where))
         END IF
-        IF LENGTH(cfg.suites[i].module) > 0 THEN
+        # A value still holding a "$" names an unset variable, already reported.
+        IF LENGTH(cfg.suites[i].module) > 0 AND NOT hasDollar(cfg.suites[i].module) THEN
             IF NOT os.Path.exists(cfg.suites[i].module)
                 AND NOT os.Path.exists(cfg.suites[i].module || ".42m") THEN
                 CALL core.problem(b, SFMT("%1: module '%2' not found (is it compiled?)",
                     where, cfg.suites[i].module))
             END IF
         END IF
-        IF isActionSuite(cfg.suites[i]) THEN
+        IF isActionSuite(cfg.suites[i]) AND NOT hasDollar(cfg.suites[i].actions) THEN
             IF NOT os.Path.exists(cfg.suites[i].actions) THEN
                 CALL core.problem(b, SFMT("%1: action file '%2' not found", where, cfg.suites[i].actions))
             END IF
@@ -443,7 +458,10 @@ END FUNCTION
 #+ A suite's reports and log are named after it, and the CLI deletes stale
 #+ copies before every run; a name that turns one of them into the config file,
 #+ an action file, the summary or the scenario-server log would destroy that
-#+ file before the suite even starts.
+#+ file before the suite even starts. Nor may a report name an existing file
+#+ that is not an fgltest report — an `orders.tap` of the user's beside a suite
+#+ called "orders", or the project's `fglpkg.json` beside one called "fglpkg"
+#+ (see isOwnReport). Logs and test lists named after a suite are fgltest's.
 PUBLIC FUNCTION outputClash(cfg Config, cfgPath STRING, name STRING) RETURNS STRING
     DEFINE tok base.StringTokenizer
     DEFINE f STRING
@@ -478,8 +496,94 @@ PUBLIC FUNCTION outputClash(cfg Config, cfgPath STRING, name STRING) RETURNS STR
                 END IF
             END IF
         END FOR
+        IF NOT isOwnReport(f) THEN
+            RETURN SFMT("'%1' exists and is not an fgltest report — it would be deleted or overwritten; rename the suite or set \"outdir\"", f)
+        END IF
     END WHILE
     RETURN NULL
+END FUNCTION
+
+#+ TRUE unless `path` is a report-type file (.json, .junit.xml, .tap, .done)
+#+ that fgltest did not write: a JSON report has "suite" and "cases", JUnit
+#+ has <testsuites>, TAP starts "TAP version", a marker reads "done". Other
+#+ files are not judged (TRUE).
+PUBLIC FUNCTION isOwnReport(path STRING) RETURNS BOOLEAN
+    DEFINE txt, first STRING
+    DEFINE o util.JSONObject
+
+    IF NOT isReportFile(path) OR NOT os.Path.exists(path) THEN
+        RETURN TRUE
+    END IF
+    LET txt = readText(path)
+    IF txt IS NULL THEN
+        RETURN FALSE
+    END IF
+    LET first = txt
+    IF txt.getIndexOf(ASCII 10, 1) > 0 THEN
+        LET first = txt.subString(1, txt.getIndexOf(ASCII 10, 1) - 1)
+    END IF
+    CASE
+        WHEN endsWithText(path, ".done")
+            RETURN (first == "done")
+        WHEN endsWithText(path, ".tap")
+            RETURN (first.getIndexOf("TAP version", 1) == 1)
+        WHEN endsWithText(path, ".junit.xml")
+            RETURN (txt.getIndexOf("<testsuites", 1) > 0)
+        WHEN endsWithText(path, ".json")
+            TRY
+                LET o = util.JSONObject.parse(txt)
+            CATCH
+                RETURN FALSE
+            END TRY
+            RETURN (o.has("suite") AND o.has("cases"))
+    END CASE
+    RETURN TRUE
+END FUNCTION
+
+PRIVATE FUNCTION isReportFile(path STRING) RETURNS BOOLEAN
+    DEFINE tok base.StringTokenizer
+    LET tok = base.StringTokenizer.create(REPORT_EXTS, ",")
+    WHILE tok.hasMoreTokens()
+        IF endsWithText(path, tok.nextToken()) THEN
+            RETURN TRUE
+        END IF
+    END WHILE
+    RETURN FALSE
+END FUNCTION
+
+PRIVATE FUNCTION endsWithText(s STRING, suffix STRING) RETURNS BOOLEAN
+    IF suffix.getLength() > s.getLength() THEN
+        RETURN FALSE
+    END IF
+    RETURN (s.subString(s.getLength() - suffix.getLength() + 1, s.getLength()) == suffix)
+END FUNCTION
+
+# A file's whole text (NULL if it cannot be read).
+PRIVATE FUNCTION readText(path STRING) RETURNS STRING
+    DEFINE ch base.Channel
+    DEFINE b base.StringBuffer
+    DEFINE line STRING
+    LET ch = base.Channel.create()
+    TRY
+        CALL ch.openFile(path, "r")
+    CATCH
+        RETURN NULL
+    END TRY
+    LET b = base.StringBuffer.create()
+    WHILE (line := ch.readLine()) IS NOT NULL
+        CALL b.append(line)
+        CALL b.append(ASCII 10)
+    END WHILE
+    CALL ch.close()
+    RETURN b.toString()
+END FUNCTION
+
+# TRUE if a config value still holds a "$" (an unset variable left as written).
+PRIVATE FUNCTION hasDollar(v STRING) RETURNS BOOLEAN
+    IF v.getIndexOf("$", 1) > 0 THEN
+        RETURN TRUE
+    END IF
+    RETURN FALSE
 END FUNCTION
 
 PRIVATE FUNCTION sameFile(a STRING, b STRING) RETURNS BOOLEAN
@@ -566,25 +670,30 @@ END FUNCTION
 
 # ------------------------------------------------------------ run files ----
 
-#+ Delete the reports and completion marker a previous run of `rname` left in
-#+ outdir. The CLI reads `<rname>.json` and `<rname>.done` back after a suite
-#+ exits, so a copy left from an earlier run would be taken for this run's
-#+ results — a suite that never started would report the old run's passes.
+#+ Delete every file a previous run of `rname` left in outdir: its reports,
+#+ completion marker, log and test list. The CLI reads `<rname>.json` and
+#+ `<rname>.done` back after a suite exits, so a copy left from an earlier run
+#+ would be taken for this run's results — a suite that never started would
+#+ report the old run's passes. A report-type file fgltest did not write is
+#+ left alone and reported (see isOwnReport).
 #+
-#+ @return NULL, or which file could not be removed (it would be read back)
+#+ @return NULL, or which file could not (or may not) be removed
 PUBLIC FUNCTION clearRunFiles(outdir STRING, rname STRING) RETURNS STRING
+    DEFINE tok base.StringTokenizer
     DEFINE err STRING
-    LET err = removeFile(SFMT("%1/%2.json", outdir, rname))
-    IF err IS NULL THEN
-        LET err = removeFile(SFMT("%1/%2.junit.xml", outdir, rname))
-    END IF
-    IF err IS NULL THEN
-        LET err = removeFile(SFMT("%1/%2.tap", outdir, rname))
-    END IF
-    IF err IS NULL THEN
-        LET err = removeFile(SFMT("%1/%2.done", outdir, rname))
-    END IF
+    LET tok = base.StringTokenizer.create(RUN_FILE_EXTS, ",")
+    WHILE tok.hasMoreTokens() AND err IS NULL
+        LET err = removeRunFile(SFMT("%1/%2%3", outdir, rname, tok.nextToken()))
+    END WHILE
     RETURN err
+END FUNCTION
+
+# removeFile(), but only for a file fgltest wrote.
+PRIVATE FUNCTION removeRunFile(path STRING) RETURNS STRING
+    IF NOT isOwnReport(path) THEN
+        RETURN SFMT("refusing to remove '%1': it is not an fgltest report", path)
+    END IF
+    RETURN removeFile(path)
 END FUNCTION
 
 #+ Delete every per-test file an earlier isolated run of suite `name` left in
@@ -605,7 +714,7 @@ PUBLIC FUNCTION clearIsolatedFiles(outdir STRING, name STRING) RETURNS STRING
             EXIT WHILE
         END IF
         IF isIsolatedFile(entry, name) THEN
-            LET err = removeFile(os.Path.join(outdir, entry))
+            LET err = removeRunFile(os.Path.join(outdir, entry))
             IF err IS NOT NULL THEN
                 EXIT WHILE
             END IF

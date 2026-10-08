@@ -405,9 +405,12 @@ command; a missing `target`, `value`, `column` or `row` (rows start at 1); a
 count or delay (`pause`, `assertFieldCount`, `assertRowCount*`,
 `assertCurrentRow`) that is not a whole number; two tests with the same name;
 an unknown key (`"skipp": true` would otherwise run the test); and a value of
-the wrong type (`"row": 1.5` would otherwise be row 1). Keys match without
-regard to case, as the JSON parser matches them — except `column` and `row`,
-which must be spelled exactly. Keys starting with `$` or `_` are allowed.
+the wrong type (`"row": 1.5` would otherwise be row 1). Values the parser
+converts cleanly are accepted: `"row": "3"`, a numeric `"column"` or `"name"`,
+and counts written as numbers (`5`, `5.0`, `1e3`). Keys match without regard
+to case, as the JSON parser matches them — except `column` and `row`, which
+must be spelled exactly. Keys starting with `$` or `_` are allowed, so a
+comment can go in `"_description"`.
 
 ```
 fgltest_json: action file 'tests/price.actions.json' is not valid:
@@ -515,13 +518,17 @@ application starts, and every problem is listed (exit code 2):
 - an unknown key — a typo such as `comandLine` would otherwise be silently
   ignored. Keys match without regard to case, as the JSON parser matches them;
   keys starting with `$` or `_` are allowed, for `$schema` or comment entries;
-- a value of the wrong type — `"timeout": "30s"` or `"isolate": "yes"` would
-  otherwise become NULL, `"timeout": 1.5` would be truncated;
+- a value the JSON parser cannot convert cleanly — `"timeout": "30s"` or
+  `"isolate": "yes"` would otherwise become NULL, `"timeout": 1.5` would be
+  truncated. What it does convert is accepted, as it always was: `"60"` for a
+  number, `1` / `0` or `"1"` / `"0"` for a boolean, `5` for a string;
 - a `port` outside 1–65535 (an absent `port` is 6500);
 - a suite without a name or reusing another's (suites write reports under
   their name); a name with a path separator, or `fgltest.summary` /
-  `ggcserver` (reserved); a suite whose reports would overwrite the config or
-  an action file — the CLI deletes stale reports before it runs;
+  `ggcserver` (reserved); a suite whose reports would overwrite the config, an
+  action file, or any other report-type file (`.json`, `.junit.xml`, `.tap`,
+  `.done`) that fgltest did not write — the CLI deletes stale reports before
+  it runs, and protects files it does not recognise as its own;
 - a suite with both or neither of `module` / `actions`, a `module` (or
   `.42m`) or action file that does not exist;
 - an unknown `mode` or reporter, a `ua` suite without a `url`, a negative
@@ -536,7 +543,8 @@ suite's `module` / `actions` / `workdir` / `commandLine` / `url`, and the same
 `discover` keys, are replaced by the variable's value — by fgltest, the same
 way on every platform, before paths are resolved. `$$` is a literal `$`, and a
 `$` not followed by a name is kept. The values are then passed to the suite
-exactly as they are: no shell sees them.
+exactly as they are — with one Windows caveat: `cmd.exe` expands `%NAME%` even
+inside quotes, and cannot be stopped from doing so there.
 
 **Paths.** Every relative path in the config — `outdir`, `jsonRunner`, a suite's
 `module` / `actions` / `workdir`, and `discover.dir` / `discover.workdir` — is
@@ -710,9 +718,9 @@ never reached (`not run: …`).
 The CLI also checks that each suite process reached the end: the runner drops a
 `<name>.done` marker when it finishes, and a process that exits without one is
 counted as **incomplete**, even if every test that finished had passed. Before
-the run the CLI deletes every suite's previous reports and markers — the
-whole-suite and the per-test (isolated) ones alike, whichever mode ran last —
-and one it cannot delete stops the run (exit code 2), so results
+the run the CLI deletes every suite's previous reports, markers, logs and test
+lists — the whole-suite and the per-test (isolated) ones alike, whichever mode
+ran last — and one it cannot delete stops the run (exit code 2), so results
 left by an earlier run can never stand in for this one.
 
 The process exit code is non-zero if any test failed or errored, or any suite

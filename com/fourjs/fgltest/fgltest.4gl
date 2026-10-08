@@ -76,11 +76,11 @@ MAIN
 
     # Defaults, plus every relative path resolved against the config's own
     # directory (before discovery, which builds on the resolved discover.dir).
+    # Every mistake in the config at once, before a server or app starts:
+    # normalize() reports its problems (a bad port, an unset variable) without
+    # stopping, and checkConfig() lists them with its own.
     LET err = cli.normalize(cfg, cfgPath, base.Application.getProgramDir())
-    IF err IS NULL THEN
-        # Every mistake in the config at once, before a server or app starts.
-        LET err = cli.checkConfig(cfgPath, jsonText, cfg)
-    END IF
+    LET err = cli.checkConfig(cfgPath, jsonText, cfg, err)
     IF err IS NOT NULL THEN
         DISPLAY SFMT("fgltest: %1", err)
         EXIT PROGRAM 2

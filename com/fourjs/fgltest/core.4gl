@@ -94,7 +94,9 @@ END FUNCTION
 #+ rules of sh on POSIX systems and of the C runtime's argument parser on
 #+ Windows, so the value arrives exactly as given — quotes, backslashes, `$`
 #+ and backticks included. (fgltest expands `$NAME` in config values itself,
-#+ before quoting; see cli.expandEnv.)
+#+ before quoting; see cli.expandEnv.) One exception on Windows: cmd.exe
+#+ expands `%NAME%` even inside double quotes, and has no reliable escape for
+#+ it there, so a value holding `%NAME%` is expanded by the shell.
 PUBLIC FUNCTION shellArg(s STRING) RETURNS STRING
     RETURN quoteArg(s, os.Path.separator() == "\\")
 END FUNCTION
@@ -182,8 +184,11 @@ END FUNCTION
 
 #+ Check a parsed JSON object against a shape, appending a "  - " line to `b`
 #+ for every problem: a key the shape does not list (a typo the JSON parser
-#+ would otherwise drop silently), or a value of the wrong type (which the
-#+ parser would turn into NULL, or truncate).
+#+ would otherwise drop silently), or a value util.JSON.parse cannot convert
+#+ to the member's type without losing it — it would become NULL ("30s" for a
+#+ number, "yes" for a boolean) or be truncated (6.5 for a whole number).
+#+ What the parser does convert cleanly is accepted, as it always was: "60"
+#+ for a whole number, 1 / 0 or "1" / "0" for a boolean, 5 for a string.
 #+
 #+ `spec` is a comma-separated list of key:type, type being string, number,
 #+ int (a whole number), boolean, object, array or any. Keys match without
@@ -288,25 +293,60 @@ END FUNCTION
 
 PRIVATE FUNCTION typeFits(o util.JSONObject, k STRING, expected STRING, actual STRING) RETURNS BOOLEAN
     DEFINE f FLOAT
-    DEFINE n BIGINT
+    DEFINE v STRING
     CASE expected
-        WHEN "string" RETURN (actual == "STRING")
-        WHEN "number" RETURN (actual == "NUMBER")
-        WHEN "boolean" RETURN (actual == "BOOLEAN")
+        WHEN "string"
+            -- a number's JSON text becomes the string, as the parser does
+            RETURN (actual == "STRING" OR actual == "NUMBER")
+        WHEN "number"
+            IF actual == "NUMBER" THEN
+                RETURN TRUE
+            END IF
+            IF actual == "STRING" THEN
+                LET v = o.get(k)
+                RETURN v.matches("^ *[-+]?[0-9]+([.][0-9]+)? *$")
+            END IF
+            RETURN FALSE
+        WHEN "int"
+            IF actual == "NUMBER" THEN
+                LET f = o.get(k)
+                RETURN isWhole(f)   -- 5.0 and 1e3 are whole; 6.5 would be cut
+            END IF
+            IF actual == "STRING" THEN
+                LET v = o.get(k)
+                RETURN v.matches("^ *[-+]?[0-9]+ *$")
+            END IF
+            RETURN FALSE
+        WHEN "boolean"
+            IF actual == "BOOLEAN" THEN
+                RETURN TRUE
+            END IF
+            IF actual == "NUMBER" THEN
+                LET f = o.get(k)
+                RETURN (f == 0 OR f == 1)
+            END IF
+            IF actual == "STRING" THEN
+                LET v = o.get(k)
+                RETURN v.matches("^ *[01] *$")
+            END IF
+            RETURN FALSE
         WHEN "object" RETURN (actual == "OBJECT")
         WHEN "array" RETURN (actual == "ARRAY")
-        WHEN "int"
-            IF actual != "NUMBER" THEN
-                RETURN FALSE
-            END IF
-            LET f = o.get(k)
-            LET n = f
-            IF n IS NULL OR n != f THEN
-                RETURN FALSE
-            END IF
-            RETURN TRUE
     END CASE
     RETURN FALSE
+END FUNCTION
+
+#+ TRUE if f is a whole number that fits a BIGINT.
+PUBLIC FUNCTION isWhole(f FLOAT) RETURNS BOOLEAN
+    DEFINE n BIGINT
+    IF f IS NULL THEN
+        RETURN FALSE
+    END IF
+    LET n = f
+    IF n IS NULL OR n != f THEN
+        RETURN FALSE
+    END IF
+    RETURN TRUE
 END FUNCTION
 
 PRIVATE FUNCTION describeType(t STRING) RETURNS STRING
@@ -314,7 +354,7 @@ PRIVATE FUNCTION describeType(t STRING) RETURNS STRING
         WHEN "string" RETURN "a string"
         WHEN "number" RETURN "a number"
         WHEN "int" RETURN "a whole number"
-        WHEN "boolean" RETURN "true or false"
+        WHEN "boolean" RETURN "true or false (or 1 / 0)"
         WHEN "object" RETURN "an object"
         WHEN "array" RETURN "a list"
     END CASE

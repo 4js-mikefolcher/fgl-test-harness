@@ -68,8 +68,9 @@ tests: lib
 # application, so it runs anywhere the compiler does — this is the target CI
 # should gate on. They run twice, under each FGL_LENGTH_SEMANTICS: BYTE is
 # Genero's default and CHAR a common setting, and string code that is right
-# under one can split multibyte text under the other. (A UTF-8 locale is
-# assumed, as for Genero itself.)
+# under one can split multibyte text under the other. They need a UTF-8 locale
+# (as Genero does): without one the multibyte cases would pass vacuously, so
+# selftest's first check fails instead.
 check: check-byte check-char
 
 check-byte: export FGL_LENGTH_SEMANTICS = BYTE

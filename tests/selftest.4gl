@@ -40,6 +40,9 @@ END RECORD
 MAIN
     CALL setup()
 
+    CALL group("environment: a UTF-8 locale is active")
+    CALL t_utf8_locale()
+
     CALL group("expect: scalar matchers")
     CALL t_expect_scalar()
     CALL group("expect: empty and NULL handling")
@@ -73,6 +76,8 @@ MAIN
     CALL t_script_validation()
     CALL group("script: step dispatch")
     CALL t_script_exec()
+    CALL group("script: values the parser converts cleanly are accepted")
+    CALL t_script_lenient()
     CALL group("script: every declared command is dispatched")
     CALL t_script_coverage()
     CALL group("script: the JSON Schema says what the command table says")
@@ -99,6 +104,12 @@ MAIN
     CALL t_cli_env()
     CALL group("cli: value types and report-name clashes")
     CALL t_cli_types_and_clashes()
+    CALL group("cli: values the parser converts cleanly are accepted")
+    CALL t_cli_lenient()
+    CALL group("cli: every config problem is listed at once")
+    CALL t_cli_all_problems()
+    CALL group("cli: files fgltest did not write are left alone")
+    CALL t_cli_ownership()
     CALL group("ggcdriver: which statuses end the session")
     CALL t_ggc_session()
     CALL group("cli: isolate mode enumerates each test name once")
@@ -598,13 +609,13 @@ FUNCTION t_script_validation()
     CALL writeTmp(p,
         '{"application":"app","$comment":"ok","_note":"ok","tests":[{"name":"t","skipp":true,"steps":['
         || '{"command":"selectRow","target":"t","row":1.5},'
-        || '{"command":"selectRow","target":"t","row":"3"},'
+        || '{"command":"selectRow","target":"t","row":"three"},'
         || '{"command":"selectRow","target":"t","Row":2},'
         || '{"command":"clear","row":0}]}]}')
     LET err = script.load(p)
     CALL check("an unknown test key is rejected", contains(err, "test 't': unknown key \"skipp\""))
     CALL check("a fractional row is rejected", contains(err, "test 't' step 1: \"row\" must be a whole number, not 1.5"))
-    CALL check("a row given as a string is rejected", contains(err, "step 2: \"row\" must be a whole number, not the string \"3\""))
+    CALL check("a row that is not a number is rejected", contains(err, "step 2: \"row\" must be a whole number, not the string \"three\""))
     CALL check("a json_name key must be spelled exactly", contains(err, "step 3: unknown key \"Row\""))
     CALL check("a row below 1 is rejected on any command", contains(err, "step 4: \"row\" must be 1 or more"))
     CALL check("$ and _ keys are allowed", NOT contains(err, "comment") AND NOT contains(err, "_note"))
@@ -815,6 +826,11 @@ FUNCTION t_tap()
     LET x = reporters.toTAP(o)
     CALL check("non-ASCII text in a message is kept intact", contains(x, '"café — naïve ü 日本"'))
     CALL check("control characters and DEL are dropped", contains(x, '"bell del end"'))
+    LET o[2].messages[2] = "c1" || util.Strings.urlDecode("%C2%90") || " nel"
+        || util.Strings.urlDecode("%C2%85") || " end"
+    LET x = reporters.toTAP(o)
+    CALL check("C1 control characters are dropped, NEL kept",
+        contains(x, '"c1 nel' || util.Strings.urlDecode("%C2%85") || ' end"'))
 END FUNCTION
 
 FUNCTION t_json()
@@ -1012,14 +1028,15 @@ FUNCTION t_cli_cleanup()
 
     LET dir = os.Path.makeTempName()
     LET ok = os.Path.mkDir(dir)
-    CALL touch(dir, "s.json")
-    CALL touch(dir, "s.junit.xml")
-    CALL touch(dir, "s.tap")
-    CALL touch(dir, "s.done")
+    CALL report(dir, "s.json")
+    CALL report(dir, "s.junit.xml")
+    CALL report(dir, "s.tap")
+    CALL report(dir, "s.done")
     CALL touch(dir, "s.log")
-    CALL touch(dir, "s.1.json")
-    CALL touch(dir, "s.12.junit.xml")
-    CALL touch(dir, "s.3.done")
+    CALL touch(dir, "s.tests")
+    CALL report(dir, "s.1.json")
+    CALL report(dir, "s.12.junit.xml")
+    CALL report(dir, "s.3.done")
     CALL touch(dir, "s.2.log")
     CALL touch(dir, "s.x.json")
     CALL touch(dir, "s-json.1.json")
@@ -1030,6 +1047,8 @@ FUNCTION t_cli_cleanup()
     CALL check("a stale JUnit report is removed", NOT there(dir, "s.junit.xml"))
     CALL check("a stale TAP report is removed", NOT there(dir, "s.tap"))
     CALL check("a stale completion marker is removed", NOT there(dir, "s.done"))
+    CALL check("the suite's old log is removed", NOT there(dir, "s.log"))
+    CALL check("an old test list from isolate mode is removed", NOT there(dir, "s.tests"))
     CALL check("other suites' files are left alone", there(dir, "s-json.1.json"))
     CALL check("the config is left alone", there(dir, "fgltest.json"))
 
@@ -1047,10 +1066,22 @@ FUNCTION t_cli_cleanup()
     LET ok = os.Path.mkDir(os.Path.join(dir, "stuck.json"))
     CALL touch(dir, "stuck.json/keep")
     CALL check("a report that cannot be removed is reported",
-        contains(cli.clearRunFiles(dir, "stuck"), "cannot remove"))
+        contains(cli.clearRunFiles(dir, "stuck"), "stuck.json"))
     LET ok = os.Path.delete(os.Path.join(dir, "stuck.json/keep"))
 
     CALL removeDir(dir)
+END FUNCTION
+
+# A file with the content fgltest writes for a report of that type.
+FUNCTION report(dir STRING, name STRING)
+    DEFINE c STRING
+    CASE
+        WHEN name MATCHES "*.junit.xml" LET c = '<?xml version="1.0"?><testsuites tests="0"></testsuites>'
+        WHEN name MATCHES "*.json" LET c = '{"suite":"s","tests":0,"cases":[]}'
+        WHEN name MATCHES "*.tap" LET c = "TAP version 13"
+        WHEN name MATCHES "*.done" LET c = "done"
+    END CASE
+    CALL writeTmp(os.Path.join(dir, name), c)
 END FUNCTION
 
 FUNCTION touch(dir STRING, name STRING)
@@ -1479,7 +1510,7 @@ FUNCTION t_cli_checkconfig()
         || '{"name":"b","actions":"b.actions.json","mode":"ua","url":"http://h/ua/r/b"}]}'
     CALL util.JSON.parse(text, cfg)
     LET err = cli.normalize(cfg, cfgPath, "/opt/pkg/")
-    LET err = cli.checkConfig(cfgPath, text, cfg)
+    LET err = cli.checkConfig(cfgPath, text, cfg, err)
     CALL check("a valid config passes", err IS NULL)
     IF err IS NOT NULL THEN
         DISPLAY "# ", err
@@ -1498,7 +1529,7 @@ FUNCTION t_cli_checkconfig()
         || '{"name":"f","actions":"b.actions.json","mode":"telnet","timeout":-1}]}'
     CALL util.JSON.parse(text, bad)
     LET err = cli.normalize(bad, cfgPath, "/opt/pkg/")
-    LET err = cli.checkConfig(cfgPath, text, bad)
+    LET err = cli.checkConfig(cfgPath, text, bad, err)
     CALL check("an unknown top-level key is reported", contains(err, 'the config: unknown key "reporter"'))
     CALL check("an unknown suite key is reported", contains(err, 'suite #1: unknown key "comandLine"'))
     CALL check("a reused suite name is reported", contains(err, "suite #2 reuses the name 'a' of suite #1"))
@@ -1654,7 +1685,7 @@ FUNCTION t_cli_types_and_clashes()
     CALL writeTmp(cfgPath, text)
     CALL util.JSON.parse(text, c1)
     LET err = cli.normalize(c1, cfgPath, "/opt/pkg/")
-    LET err = cli.checkConfig(cfgPath, text, c1)
+    LET err = cli.checkConfig(cfgPath, text, c1, err)
     CALL check("keys in another case are accepted", err IS NULL)
     IF err IS NOT NULL THEN
         DISPLAY "# ", err
@@ -1665,7 +1696,7 @@ FUNCTION t_cli_types_and_clashes()
     CALL writeTmp(cfgPath, text)
     CALL util.JSON.parse(text, c2)
     LET err = cli.normalize(c2, cfgPath, "/opt/pkg/")
-    LET err = cli.checkConfig(cfgPath, text, c2)
+    LET err = cli.checkConfig(cfgPath, text, c2, err)
     CALL check("a string timeout is rejected", contains(err, 'the config: "timeout" must be a whole number, not the string "30s"'))
     CALL check("a non-boolean isolate is rejected", contains(err, '"isolate" must be true or false'))
     CALL check("a fractional suite timeout is rejected", contains(err, 'suite #1: "timeout" must be a whole number, not 1.5'))
@@ -1676,7 +1707,7 @@ FUNCTION t_cli_types_and_clashes()
     CALL writeTmp(cfgPath, text)
     CALL util.JSON.parse(text, c3)
     LET err = cli.normalize(c3, cfgPath, "/opt/pkg/")
-    LET err = cli.checkConfig(cfgPath, text, c3)
+    LET err = cli.checkConfig(cfgPath, text, c3, err)
     CALL check("a suite whose report would replace the config is rejected",
         contains(err, "suite 'fgltest': its report") AND contains(err, "would replace the config file"))
     CALL check("a reserved suite name is rejected", contains(err, "the name 'ggcserver' is reserved"))
@@ -1697,4 +1728,143 @@ FUNCTION t_ggc_session()
         NOT ggcdriver.sessionOver(12, "The DVM is not in interactive state but VM processing"))
     CALL check("a bad field name does not end the session",
         NOT ggcdriver.sessionOver(7, "FormField not found"))
+END FUNCTION
+
+# ---------------------------------------------------------- environment ----
+
+# The multibyte cases below only catch a string bug when the locale is UTF-8:
+# under a single-byte one, getCharAt() returns whole bytes and a broken
+# per-character loop leaves the text intact, so the cases would pass
+# vacuously. Fail instead, naming the fix.
+FUNCTION t_utf8_locale()
+    DEFINE e STRING
+    LET e = "é"
+    CALL check(SFMT("a UTF-8 locale is active (LANG=%1); set LANG to one, e.g. C.UTF-8",
+        fgl_getenv("LANG")), e.getCharAt(1) == e)
+END FUNCTION
+
+# -------------------------------------------------- lenient conversions ----
+
+# util.JSON.parse converts "60" to a whole number and 1 to TRUE, so configs
+# relying on that kept working on main and must keep working; only values it
+# cannot convert, or would truncate, are mistakes.
+FUNCTION t_cli_lenient()
+    DEFINE dir, cfgPath, text, err STRING
+    DEFINE ok INTEGER
+    DEFINE c1, c2 cli.Config
+
+    LET dir = os.Path.makeTempName()
+    LET ok = os.Path.mkDir(dir)
+    CALL touch(dir, "a_test.42m")
+    LET cfgPath = os.Path.join(dir, "fgltest.json")
+
+    LET text = '{"port":"6752","timeout":"60","isolate":1,"suites":['
+        || '{"name":"a","module":"a_test","isolate":"1","timeout":" 30"}]}'
+    CALL writeTmp(cfgPath, text)
+    CALL util.JSON.parse(text, c1)
+    LET err = cli.normalize(c1, cfgPath, "/opt/pkg/")
+    LET err = cli.checkConfig(cfgPath, text, c1, err)
+    CALL check("numeric strings and 0/1 booleans are accepted", err IS NULL)
+    IF err IS NOT NULL THEN
+        DISPLAY "# ", err
+    END IF
+    CALL checkInt("... and applied (port)", c1.port, 6752)
+    CALL checkInt("... and applied (timeout)", c1.timeout, 60)
+    CALL check("... and applied (isolate)", core.isTrue(c1.isolate))
+    CALL check("... and applied (a suite's isolate)", core.isTrue(c1.suites[1].isolate))
+
+    LET text = '{"timeout":"6.5","isolate":2,"suites":[{"name":"a","module":"a_test"}]}'
+    CALL writeTmp(cfgPath, text)
+    CALL util.JSON.parse(text, c2)
+    LET err = cli.normalize(c2, cfgPath, "/opt/pkg/")
+    LET err = cli.checkConfig(cfgPath, text, c2, err)
+    CALL check("a fractional string the parser would cut is rejected",
+        contains(err, '"timeout" must be a whole number, not the string "6.5"'))
+    CALL check("a number other than 0 / 1 is not a boolean", contains(err, '"isolate" must be true or false'))
+    CALL removeDir(dir)
+END FUNCTION
+
+FUNCTION t_script_lenient()
+    DEFINE p, err STRING
+    DEFINE steps script.StepList
+    DEFINE ok INTEGER
+
+    LET p = "selftest_lenient.json"
+    CALL writeTmp(p,
+        '{"application":"app","tests":[{"name":5,"steps":['
+        || '{"command":"selectRow","target":"t","row":"3"},'
+        || '{"command":"assertCell","target":"t","column":5,"value":"x"},'
+        || '{"command":"pause","value":5.0},'
+        || '{"command":"pause","value":1e3},'
+        || '{"command":"assertField","target":"f","value":5.0}]}]}')
+    LET err = script.load(p)
+    CALL check("numbers and numeric strings the parser converts load", err IS NULL)
+    IF err IS NOT NULL THEN
+        DISPLAY "# ", err
+    END IF
+    LET steps = script.testStepsAt(1)
+    CALL checkEq("a numeric name is a name", script.testName(1), "5")
+    CALL checkInt('"row": "3" is row 3', steps[1].rowNum, 3)
+    CALL checkEq('"column": 5 is column "5"', steps[2].col, "5")
+    -- the schema calls 5.0 and 1e3 whole numbers, so the loader must too
+    CALL checkEq("a whole-number count written 5.0 is 5", steps[3].value, "5")
+    CALL checkEq("a whole-number count written 1e3 is 1000", steps[4].value, "1000")
+    CALL checkEq("a value that is not a count is kept as written", steps[5].value, "5.0")
+
+    CALL writeTmp(p,
+        '{"application":"app","description":"x","tests":[{"name":"t","steps":['
+        || '{"command":"pause","value":5.5}]}]}')
+    LET err = script.load(p)
+    CALL check("a fractional count is rejected", contains(err, "needs a whole-number \"value\", not '5.5'"))
+    CALL check("a description key is unknown (use _description)", contains(err, 'unknown key "description"'))
+    LET ok = os.Path.delete(p)
+END FUNCTION
+
+FUNCTION t_cli_all_problems()
+    DEFINE text, err STRING
+    DEFINE c cli.Config
+
+    -- an unset variable used to hide every other problem
+    LET text = '{"colour":"red","suites":[{"name":"a","module":"$SELFTEST_NOPE/a_test"},'
+        || '{"name":"a","module":"missing_test","mode":"telnet"}]}'
+    CALL util.JSON.parse(text, c)
+    LET err = cli.normalize(c, "fgltest.json", "/opt/pkg/")
+    LET err = cli.checkConfig("fgltest.json", text, c, err)
+    CALL check("the unset variable is listed", contains(err, "environment variable SELFTEST_NOPE"))
+    CALL check("... and the unknown key", contains(err, 'unknown key "colour"'))
+    CALL check("... and the reused name", contains(err, "reuses the name 'a'"))
+    CALL check("... and the missing module", contains(err, "module 'missing_test' not found"))
+    CALL check("... and the bad mode", contains(err, "unknown \"mode\" 'telnet'"))
+    CALL check("a path naming the unset variable is not also called missing",
+        NOT contains(err, "SELFTEST_NOPE/a_test' not found"))
+END FUNCTION
+
+FUNCTION t_cli_ownership()
+    DEFINE dir, cfgPath, text, err STRING
+    DEFINE ok INTEGER
+    DEFINE c cli.Config
+
+    LET dir = os.Path.makeTempName()
+    LET ok = os.Path.mkDir(dir)
+    CALL writeTmp(os.Path.join(dir, "orders.tap"), "precious data")
+    CALL writeTmp(os.Path.join(dir, "fglpkg.json"), '{"name":"app","version":"1.0.0"}')
+    CALL report(dir, "mine.tap")
+    CALL touch(dir, "a_test.42m")
+    LET cfgPath = os.Path.join(dir, "fgltest.json")
+    LET text = '{"reporters":"console","suites":[{"name":"orders","module":"a_test"},'
+        || '{"name":"fglpkg","module":"a_test"},{"name":"mine","module":"a_test"}]}'
+    CALL writeTmp(cfgPath, text)
+    CALL util.JSON.parse(text, c)
+    LET err = cli.normalize(c, cfgPath, "/opt/pkg/")
+    LET err = cli.checkConfig(cfgPath, text, c, err)
+    CALL check("a user's file named like a report is protected",
+        contains(err, "suite 'orders'") AND contains(err, "orders.tap' exists and is not an fgltest report"))
+    CALL check("the project's fglpkg.json is protected", contains(err, "fglpkg.json' exists and is not an fgltest report"))
+    CALL check("an earlier fgltest report is not a clash", NOT contains(err, "suite 'mine'"))
+    CALL check("clearRunFiles refuses a file fgltest did not write",
+        contains(cli.clearRunFiles(dir, "orders"), "refusing to remove"))
+    CALL check("... and leaves it in place", there(dir, "orders.tap"))
+    CALL check("clearRunFiles removes fgltest's own report", cli.clearRunFiles(dir, "mine") IS NULL)
+    CALL check("... which is gone", NOT there(dir, "mine.tap"))
+    CALL removeDir(dir)
 END FUNCTION
