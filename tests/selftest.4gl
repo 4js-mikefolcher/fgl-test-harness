@@ -112,9 +112,11 @@ MAIN
     CALL t_cli_ownership()
     CALL group("ggcdriver: which statuses end the session")
     CALL t_ggc_session()
+    CALL group("ggcdriver: fill checks the focus reached its field")
+    CALL t_ggc_focus()
     CALL group("cli: isolate mode enumerates each test name once")
     CALL t_cli_unique()
-    CALL group("core: shell arguments are quoted for the platform")
+    CALL group("core: shell arguments and background commands for the platform")
     CALL t_core_quote()
 
     CALL group("runner: a process that dies still reports every test")
@@ -1580,6 +1582,16 @@ FUNCTION t_core_quote()
     CALL checkEq("windows: a quote at the end is escaped", core.quoteArg('a"', TRUE), '"a\\""')
     -- $NAME is expanded by fgltest itself, so the shell must see it literally.
     CALL checkEq("sh: $ and backticks are literal", core.quoteArg("$HOME/`x`", FALSE), '"\\$HOME/\\`x\\`"')
+
+    -- A background process must not keep the shell RUN starts, which holds
+    -- this program's output open (a caller reading it through a pipe would
+    -- wait for the process to end).
+    CALL checkEq("sh: a background command replaces the shell, its input from /dev/null",
+        core.backgroundFor("ggcadmin startbdlserver -p 6500 > \"log\" 2>&1", FALSE),
+        'exec ggcadmin startbdlserver -p 6500 > "log" 2>&1 < /dev/null')
+    CALL checkEq("windows: a background command is run as it is",
+        core.backgroundFor("ggcadmin startbdlserver -p 6500 > log 2>&1", TRUE),
+        "ggcadmin startbdlserver -p 6500 > log 2>&1")
 END FUNCTION
 
 # ------------------------------------------------- runner: duplicates ----
@@ -1728,6 +1740,21 @@ FUNCTION t_ggc_session()
         NOT ggcdriver.sessionOver(12, "The DVM is not in interactive state but VM processing"))
     CALL check("a bad field name does not end the session",
         NOT ggcdriver.sessionOver(7, "FormField not found"))
+END FUNCTION
+
+# fill moves the focus, then checks GGC put it on the field asked for: GGC
+# names the focus in full ("formonly.price"), a test may name the field by its
+# column alone.
+FUNCTION t_ggc_focus()
+    CALL check("the same name is the same field", ggcdriver.sameField("formonly.price", "formonly.price"))
+    CALL check("a column alone names the field", ggcdriver.sameField("formonly.price", "price"))
+    CALL check("... without regard to case", ggcdriver.sameField("formonly.price", "FORMONLY.Price"))
+    CALL check("another prefix for the same column still matches",
+        ggcdriver.sameField("formonly.price", "sr_item.price"))
+    CALL check("another column is another field", NOT ggcdriver.sameField("formonly.price", "formonly.name"))
+    CALL check("a column is not mistaken for part of another",
+        NOT ggcdriver.sameField("formonly.unit_price", "price"))
+    CALL check("no focus is no field", NOT ggcdriver.sameField(NULL, "price"))
 END FUNCTION
 
 # ---------------------------------------------------------- environment ----

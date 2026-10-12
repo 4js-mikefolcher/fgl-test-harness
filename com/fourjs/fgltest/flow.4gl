@@ -28,7 +28,11 @@ PUBLIC FUNCTION enter(value STRING)
     CALL d.enter(value)
 END FUNCTION
 
-#+ Focus a field and set its value in one step.
+#+ Focus a field and set its value in one step. The focus moves there as it
+#+ would for a user (the program's AFTER FIELD and BEFORE FIELD run), since the
+#+ program receives a value only from the field that has the focus. A driver
+#+ error when the program keeps the focus elsewhere: an AFTER FIELD that
+#+ rejects the current field's value, or a field that cannot be entered.
 PUBLIC FUNCTION fill(name STRING, value STRING)
     DEFINE d driver.Driver
     LET d = core.getDriver()

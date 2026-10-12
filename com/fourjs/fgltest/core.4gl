@@ -8,7 +8,7 @@ IMPORT os
 IMPORT FGL com.fourjs.fgltest.driver
 
 #+ Package version. Keep in step with fglpkg.json and CHANGELOG.md.
-PUBLIC CONSTANT VERSION = "1.1.1"
+PUBLIC CONSTANT VERSION = "1.1.2"
 
 
 #+ One recorded assertion outcome.
@@ -126,6 +126,28 @@ PUBLIC FUNCTION quoteArg(s STRING, windows BOOLEAN) RETURNS STRING
     CALL r.append(e.toString())
     CALL r.append('"')
     RETURN r.toString()
+END FUNCTION
+
+#+ `cmd` as RUN ... WITHOUT WAITING should run it when the process may outlive
+#+ this program. RUN runs a command through a shell, and on POSIX systems that
+#+ shell stays alive beside the process, holding this program's standard input,
+#+ output and error open for as long as the process runs. A caller reading
+#+ this program's output through a pipe (a CI step, an agent's subprocess call)
+#+ would then wait for the background process to end, long after this program
+#+ has. `exec` replaces the shell with the process, and its input comes from
+#+ /dev/null. `cmd` must be one command that sends its output elsewhere
+#+ (`prog args > log 2>&1`).
+PUBLIC FUNCTION background(cmd STRING) RETURNS STRING
+    RETURN backgroundFor(cmd, os.Path.separator() == "\\")
+END FUNCTION
+
+#+ background() for a given platform (windows = TRUE for Windows, where the
+#+ command is run as it is).
+PUBLIC FUNCTION backgroundFor(cmd STRING, windows BOOLEAN) RETURNS STRING
+    IF isTrue(windows) THEN
+        RETURN cmd
+    END IF
+    RETURN "exec " || cmd || " < /dev/null"
 END FUNCTION
 
 # The C runtime's rule: backslashes are literal unless they precede a quote;

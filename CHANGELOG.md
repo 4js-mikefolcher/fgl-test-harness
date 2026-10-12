@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [1.1.2] - 2026-10-12
+
+### Fixed
+
+- **`fill` reaches the program in every field, not just the one that has the
+  focus.** `fill` set the value with GGC's `setFieldValue()`, which changes
+  what GGC shows but passes the value to the program only for the field that
+  has the focus. A `fill` of any other field looked right (`assertField` read
+  it back), but the program never received it, and the value was wiped once
+  the focus reached the field. A test filling a form's fields in turn
+  therefore saved only the first. `fill` now moves the focus to the field first,
+  as the user guide always said it did and as a user would. The program's
+  `AFTER FIELD` / `BEFORE FIELD` blocks run on the way, while a `fill` of the
+  field that has the focus already runs nothing extra.
+  - **Behaviour change:** when the program keeps the focus where it is, `fill`
+    now fails the step with a driver error naming both fields, instead of
+    losing the value silently. That happens when an `AFTER FIELD` rejects the
+    current field's value, or the field cannot be entered (`NOENTRY`). A test
+    that "passed" while filling such a field was not testing what it said.
+  - Table cells of an `INPUT ARRAY` are unchanged: GGC finds no field by that
+    name either way. Use `focusCell` and `enter` for them.
+- **Background processes no longer hold the caller's output open.** `RUN ...
+  WITHOUT WAITING` runs a command through a shell, and on POSIX systems that
+  shell stays alive beside the process, keeping the program's standard output
+  open. A caller reading fgltest's output through a pipe (a CI step, a
+  `subprocess` call) could wait until a background process ended. This
+  affected the scenario server `server.ensure()` starts, when it outlives its
+  caller, and a timed-out suite the CLI leaves behind. Both are now started
+  with `exec` (and input from `/dev/null`), so nothing is left holding the
+  output. Windows is unchanged.
+
+### Added
+
+- `core.background(cmd)` / `core.backgroundFor(cmd, windows)`: the command
+  line `RUN ... WITHOUT WAITING` should use for a process that may outlive the
+  program. `ggcdriver.sameField(focused, name)`: whether the field GGC reports
+  as focused is the one a test names (by its column, whatever the prefix).
+
 ## [1.1.1] - 2026-10-08
 
 ### Changed
@@ -378,7 +416,8 @@ First public release.
 - **`Driver` INTERFACE** seam over `IMPORT FGL ggc` (default `ggcdriver`), so an
   alternate backend can be substituted without touching suites.
 
-[Unreleased]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/4js-mikefolcher/fgl-test-harness/compare/v0.3.0...v1.0.0

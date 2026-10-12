@@ -203,7 +203,7 @@ statements (BDL cannot discard a return value, so there is no method chaining).
 |------|--------|
 | `flow.field(name)` | Focus a field by name. |
 | `flow.enter(value)` | Type a value into the current field. |
-| `flow.fill(name, value)` | Focus a field and set its value in one step. |
+| `flow.fill(name, value)` | Focus a field and set its value in one step. The focus moves as it would for a user (the program's `AFTER FIELD` / `BEFORE FIELD` run); an error if the program keeps it elsewhere. |
 | `flow.clear()` | Clear the current field. |
 | `flow.action(name)` | Trigger an action (button/menu) by name. |
 | `flow.press(keyName)` | Send a key by name (e.g. `"F1"`, `"ACCEPT"`). |

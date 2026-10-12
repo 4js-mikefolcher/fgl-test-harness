@@ -97,10 +97,65 @@ FUNCTION (self GgcDriver) enter(value STRING)
     CALL check("enter", value)
 END FUNCTION
 
+# The program receives a value only from the field that has the focus. GGC's
+# setFieldValue() on any other field changes what GGC shows, but the program
+# never gets it, and it is wiped when the focus arrives. So move there first,
+# as a user would (the program's BEFORE/AFTER FIELD run; moving to the field
+# that has the focus already runs nothing), and fill only once the focus is
+# there: GGC reports success even when the program keeps the focus where it
+# was, such as an AFTER FIELD that rejects the current value, or a field that
+# cannot be entered.
 FUNCTION (self GgcDriver) setField(fieldName STRING, value STRING)
+    DEFINE focused STRING
     IF skip() THEN RETURN END IF
+    CALL ggc.setFocus(fieldName)
+    CALL check("fill", fieldName)
+    IF skip() THEN RETURN END IF
+    LET focused = ggc.getFocus()
+    IF ggc.statusCode != ggc.SUCCESS THEN
+        LET focused = NULL   -- GGC cannot say: carry on as it was asked
+        LET ggc.statusCode = ggc.SUCCESS
+    END IF
+    IF focused IS NOT NULL AND NOT sameField(focused, fieldName) THEN
+        CALL core.setDriverError(SFMT("cannot fill '%2': the program kept the focus on '%1' (it rejected that field's value, or '%2' cannot be entered) [fill '%2']",
+            focused, fieldName))
+        RETURN
+    END IF
     CALL ggc.setFieldValue(fieldName, value)
     CALL check("fill", fieldName)
+END FUNCTION
+
+#+ TRUE if `focused`, a field as GGC names the focus ("formonly.price"), is the
+#+ field `name` names, whatever its prefix: GGC accepts a field by its column
+#+ alone ("price") as well as in full. Only the columns are compared, so a
+#+ field named some other way still matches; the price is that two fields with
+#+ the same column in one form are not told apart.
+PUBLIC FUNCTION sameField(focused STRING, name STRING) RETURNS BOOLEAN
+    DEFINE f, n STRING
+    LET f = focused.toLowerCase()
+    LET n = name.toLowerCase()
+    IF LENGTH(f) == 0 OR LENGTH(n) == 0 THEN
+        RETURN FALSE
+    END IF
+    IF columnOf(f) == columnOf(n) THEN
+        RETURN TRUE
+    END IF
+    RETURN FALSE
+END FUNCTION
+
+# The column part of a field name: "price" for "formonly.price".
+PRIVATE FUNCTION columnOf(name STRING) RETURNS STRING
+    DEFINE i, dot INTEGER
+    LET dot = 0
+    LET i = name.getIndexOf(".", 1)
+    WHILE i > 0
+        LET dot = i
+        LET i = name.getIndexOf(".", i + 1)
+    END WHILE
+    IF dot == 0 THEN
+        RETURN name
+    END IF
+    RETURN name.subString(dot + 1, name.getLength())
 END FUNCTION
 
 FUNCTION (self GgcDriver) action(name STRING)

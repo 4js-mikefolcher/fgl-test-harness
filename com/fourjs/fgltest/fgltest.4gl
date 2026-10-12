@@ -311,8 +311,10 @@ FUNCTION runSuiteProc(cfg cli.Config, s cli.SuiteCfg, only STRING, rname STRING)
 
     # Timeout configured: BDL's RUN offers no PID and no timed wait, so poll for
     # the marker the runner drops on completion. GRACE lets the child's own soft
-    # budget finish and report first; the watchdog is the last resort.
-    RUN cmd WITHOUT WAITING
+    # budget finish and report first; the watchdog is the last resort. A stuck
+    # child can outlive this program (see below), so core.background() keeps it
+    # from holding this program's output open after the run has ended.
+    RUN core.background(cmd) WITHOUT WAITING
     FOR w = 1 TO tmo + GRACE_SECS
         SLEEP 1
         IF os.Path.exists(donef) THEN

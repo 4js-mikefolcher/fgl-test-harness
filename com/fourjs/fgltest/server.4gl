@@ -82,8 +82,11 @@ PUBLIC FUNCTION ensure(port INTEGER, idleSecs INTEGER, timeoutSecs INTEGER)
     END IF
     # Redirect the server process's stdout/stderr to a log so it does not clutter
     # the caller's console. Log dir from FGLTEST_OUTDIR (set by the CLI), else cwd.
-    RUN SFMT("ggcadmin startbdlserver -p %1 -i %2 > %3 2>&1",
-        port, idleSecs, core.shellArg(logDir() || "/ggcserver.log")) WITHOUT WAITING
+    # The server outlives this call, and can outlive the program (a caller that
+    # leaves it running): core.background() keeps it from holding the
+    # program's output open.
+    RUN core.background(SFMT("ggcadmin startbdlserver -p %1 -i %2 > %3 2>&1",
+        port, idleSecs, core.shellArg(logDir() || "/ggcserver.log"))) WITHOUT WAITING
     FOR i = 1 TO timeoutSecs
         IF isUp(port) THEN
             RETURN TRUE, TRUE
